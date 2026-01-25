@@ -55,6 +55,10 @@ async fn main() -> Result<()> {
     // Initialize terminal
     let mut terminal = app::init_terminal()?;
 
+    // Play splash animation
+    let accent = ui::widgets::parse_accent_color(&config.ui.accent_color);
+    let _ = app::play_splash(&mut terminal, accent);
+
     // Run the app (async)
     let mut app = App::new(config, library);
     let result = app.run(&mut terminal).await;

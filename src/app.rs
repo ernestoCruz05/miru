@@ -2,6 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use std::thread;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -745,5 +746,146 @@ pub fn init_terminal() -> io::Result<DefaultTerminal> {
 
 pub fn restore_terminal() -> io::Result<()> {
     ratatui::restore();
+    Ok(())
+}
+
+/// ASCII art for "miru" - each letter as a frame
+const MIRU_FRAMES: [&str; 4] = [
+    r#"
+                     
+  ███╗   ███╗        
+  ████╗ ████║        
+  ██╔████╔██║        
+  ██║╚██╔╝██║        
+  ██║ ╚═╝ ██║        
+  ╚═╝     ╚═╝        
+                     
+"#,
+    r#"
+                          
+  ███╗   ███╗ ██╗         
+  ████╗ ████║ ██║         
+  ██╔████╔██║ ██║         
+  ██║╚██╔╝██║ ██║         
+  ██║ ╚═╝ ██║ ██║         
+  ╚═╝     ╚═╝ ╚═╝         
+                          
+"#,
+    r#"
+                               
+  ███╗   ███╗ ██╗ ██████╗      
+  ████╗ ████║ ██║ ██╔══██╗     
+  ██╔████╔██║ ██║ ██████╔╝     
+  ██║╚██╔╝██║ ██║ ██╔══██╗     
+  ██║ ╚═╝ ██║ ██║ ██║  ██║     
+  ╚═╝     ╚═╝ ╚═╝ ╚═════╝      
+                               
+"#,
+    r#"
+                                     
+  ███╗   ███╗ ██╗ ██████╗  ██╗   ██╗ 
+  ████╗ ████║ ██║ ██╔══██╗ ██║   ██║ 
+  ██╔████╔██║ ██║ ██████╔╝ ██║   ██║ 
+  ██║╚██╔╝██║ ██║ ██╔══██╗ ██║   ██║ 
+  ██║ ╚═╝ ██║ ██║ ██║  ██║ ╚██████╔╝ 
+  ╚═╝     ╚═╝ ╚═╝ ╚═════╝   ╚═════╝  
+                                     
+"#,
+];
+
+const MIRU_TAGLINE: &str = "見る - to watch";
+
+/// Play the splash screen animation
+pub fn play_splash(terminal: &mut DefaultTerminal, accent: Color) -> io::Result<()> {
+    use ratatui::{
+        layout::{Alignment, Rect},
+        style::Style,
+        text::{Line, Text},
+        widgets::Paragraph,
+    };
+
+    // Type out each letter
+    for frame in &MIRU_FRAMES {
+        terminal.draw(|f| {
+            let area = f.area();
+            let text = Text::styled(*frame, Style::default().fg(accent));
+            
+            // Center vertically
+            let lines = frame.lines().count() as u16;
+            let y_offset = area.height.saturating_sub(lines) / 2;
+            
+            let centered_area = Rect {
+                x: 0,
+                y: y_offset,
+                width: area.width,
+                height: lines + 2,
+            };
+            
+            let para = Paragraph::new(text).alignment(Alignment::Center);
+            f.render_widget(para, centered_area);
+        })?;
+        
+        thread::sleep(Duration::from_millis(150));
+    }
+
+    // Show tagline
+    terminal.draw(|f| {
+        let area = f.area();
+        let frame_text = MIRU_FRAMES[3];
+        let lines = frame_text.lines().count() as u16;
+        let y_offset = area.height.saturating_sub(lines + 2) / 2;
+        
+        let logo_area = Rect {
+            x: 0,
+            y: y_offset,
+            width: area.width,
+            height: lines,
+        };
+        
+        let tagline_area = Rect {
+            x: 0,
+            y: y_offset + lines,
+            width: area.width,
+            height: 2,
+        };
+        
+        let logo = Paragraph::new(Text::styled(frame_text, Style::default().fg(accent)))
+            .alignment(Alignment::Center);
+        let tagline = Paragraph::new(Line::styled(MIRU_TAGLINE, Style::default().fg(Color::DarkGray)))
+            .alignment(Alignment::Center);
+        
+        f.render_widget(logo, logo_area);
+        f.render_widget(tagline, tagline_area);
+    })?;
+
+    thread::sleep(Duration::from_millis(800));
+
+    // Erase animation - delete letters in reverse
+    for i in (0..4).rev() {
+        terminal.draw(|f| {
+            let area = f.area();
+            let frame_text = MIRU_FRAMES[i];
+            let lines = frame_text.lines().count() as u16;
+            let y_offset = area.height.saturating_sub(lines) / 2;
+            
+            let centered_area = Rect {
+                x: 0,
+                y: y_offset,
+                width: area.width,
+                height: lines + 2,
+            };
+            
+            let para = Paragraph::new(Text::styled(frame_text, Style::default().fg(accent)))
+                .alignment(Alignment::Center);
+            f.render_widget(para, centered_area);
+        })?;
+        
+        thread::sleep(Duration::from_millis(80));
+    }
+
+    // Clear screen
+    terminal.draw(|_f| {})?;
+    thread::sleep(Duration::from_millis(100));
+
     Ok(())
 }
