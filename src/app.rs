@@ -12,8 +12,9 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use tokio::sync::mpsc;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
+use crate::compression;
 use crate::config::Config;
 use crate::error::Result;
 use crate::library::Library;
@@ -25,6 +26,79 @@ use crate::ui::{
 };
 
 const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "webm", "m4v", "mov", "wmv"];
+
+/// Clean up a torrent filename to a more readable format
+/// e.g., "[SubGroup] Show Name - 01 (1080p) [HASH].mkv" -> "Show Name - S01E01.mkv"
+fn clean_filename(name: &str) -> String {
+    let mut clean = name.to_string();
+    
+    // Remove common patterns
+    // Remove [...] bracketed content (subgroup, hash, quality info)
+    while let (Some(start), Some(end)) = (clean.find('['), clean.find(']')) {
+        if start < end {
+            clean = format!("{}{}", &clean[..start], &clean[end + 1..]);
+        } else {
+            break;
+        }
+    }
+    
+    // Remove (...) parenthetical content
+    while let (Some(start), Some(end)) = (clean.find('('), clean.find(')')) {
+        if start < end {
+            clean = format!("{}{}", &clean[..start], &clean[end + 1..]);
+        } else {
+            break;
+        }
+    }
+    
+    // Clean up multiple spaces and dots
+    clean = clean.replace("  ", " ").replace("..", ".").trim().to_string();
+    
+    // Try to extract episode number and format nicely
+    // Look for patterns like "- 01", "E01", "EP01", "Episode 01"
+    let episode_patterns = [
+        (regex::Regex::new(r"[Ss](\d{1,2})[Ee](\d{1,3})").unwrap(), true),  // S01E01
+        (regex::Regex::new(r"[Ee][Pp]?\.?\s*(\d{1,3})").unwrap(), false),   // E01, EP01, Ep 01
+        (regex::Regex::new(r"\s-\s*(\d{1,3})\b").unwrap(), false),          // - 01
+        (regex::Regex::new(r"#(\d{1,3})").unwrap(), false),                  // #01
+    ];
+    
+    for (re, has_season) in &episode_patterns {
+        if let Some(caps) = re.captures(&clean) {
+            if *has_season {
+                let season: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(1);
+                let episode: u32 = caps.get(2).unwrap().as_str().parse().unwrap_or(1);
+                // Get the show name (everything before the match)
+                let show_name = clean[..caps.get(0).unwrap().start()].trim();
+                let show_name = show_name.trim_end_matches(&['-', '.', ' '][..]);
+                let ext = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("mkv");
+                return format!("{} - S{:02}E{:02}.{}", show_name, season, episode, ext);
+            } else {
+                let episode: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(1);
+                let show_name = clean[..caps.get(0).unwrap().start()].trim();
+                let show_name = show_name.trim_end_matches(&['-', '.', ' '][..]);
+                let ext = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("mkv");
+                return format!("{} - E{:02}.{}", show_name, episode, ext);
+            }
+        }
+    }
+    
+    // If no pattern matched, just return cleaned name
+    clean.trim().to_string()
+}
+
+/// List subdirectories in a path (for show folders)
+fn list_subdirs(path: &Path) -> Vec<String> {
+    std::fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 fn find_video_in_dir(dir: &Path) -> Result<PathBuf> {
     // First, try to find video files directly in the directory
@@ -61,6 +135,49 @@ pub enum View {
     Episodes,
     Search,
     Downloads,
+    MoveDialog,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDialogStep {
+    SelectMediaDir,
+    SelectShow,
+    EditFilename,
+}
+
+/// State for the move-to-library dialog
+pub struct MoveDialogState {
+    pub step: MoveDialogStep,
+    pub torrent_idx: usize,
+    pub media_dirs: Vec<PathBuf>,
+    pub media_dir_state: ListState,
+    pub selected_media_dir: Option<PathBuf>,
+    pub shows_in_dir: Vec<String>,
+    pub show_state: ListState,
+    pub selected_show: Option<String>,
+    pub new_show_name: String,
+    pub creating_new: bool,
+    pub filename: String,
+    pub original_path: PathBuf,
+}
+
+impl Default for MoveDialogState {
+    fn default() -> Self {
+        Self {
+            step: MoveDialogStep::SelectMediaDir,
+            torrent_idx: 0,
+            media_dirs: Vec::new(),
+            media_dir_state: ListState::default(),
+            selected_media_dir: None,
+            shows_in_dir: Vec::new(),
+            show_state: ListState::default(),
+            selected_show: None,
+            new_show_name: String::new(),
+            creating_new: false,
+            filename: String::new(),
+            original_path: PathBuf::new(),
+        }
+    }
 }
 
 /// Messages sent from async tasks back to the main app
@@ -95,6 +212,9 @@ pub struct App {
     // Downloads view state
     pub torrents: Vec<TorrentStatus>,
     pub downloads_state: ListState,
+
+    // Move dialog state
+    pub move_dialog: MoveDialogState,
 
     // Async communication
     pub msg_tx: mpsc::UnboundedSender<AppMessage>,
@@ -139,6 +259,8 @@ impl App {
 
             torrents: Vec::new(),
             downloads_state: ListState::default(),
+
+            move_dialog: MoveDialogState::default(),
 
             msg_tx,
             msg_rx,
@@ -274,12 +396,33 @@ impl App {
 
                 let help = widgets::help_bar(&[
                     ("Enter", "play"),
+                    ("m", "move to library"),
                     ("j/k", "navigate"),
-                    ("p", "pause/resume"),
+                    ("p", "pause"),
                     ("x", "remove"),
-                    ("r", "refresh"),
                     ("Esc", "back"),
                 ]);
+                frame.render_widget(help, help_area);
+            }
+            View::MoveDialog => {
+                // Render downloads in background
+                render_downloads_view(
+                    frame,
+                    main_area,
+                    &self.torrents,
+                    &mut self.downloads_state,
+                    self.accent,
+                );
+
+                // Render move dialog overlay
+                self.render_move_dialog(frame);
+
+                let help_text = match self.move_dialog.step {
+                    MoveDialogStep::SelectMediaDir => &[("j/k", "navigate"), ("Enter", "select"), ("Esc", "cancel")][..],
+                    MoveDialogStep::SelectShow => &[("j/k", "navigate"), ("Enter", "select"), ("n", "new folder"), ("Esc", "back")][..],
+                    MoveDialogStep::EditFilename => &[("Enter", "confirm"), ("Esc", "back")][..],
+                };
+                let help = widgets::help_bar(help_text);
                 frame.render_widget(help, help_area);
             }
         }
@@ -300,6 +443,7 @@ impl App {
                     View::Episodes => self.handle_episodes_input(key.code)?,
                     View::Search => self.handle_search_input(key)?,
                     View::Downloads => self.handle_downloads_input(key.code).await?,
+                    View::MoveDialog => self.handle_move_dialog_input(key.code)?,
                 }
             }
         }
@@ -430,6 +574,9 @@ impl App {
             KeyCode::Char('x') => {
                 self.remove_selected_torrent().await;
             }
+            KeyCode::Char('m') => {
+                self.open_move_dialog();
+            }
             KeyCode::Enter => {
                 self.play_selected_download()?;
             }
@@ -450,7 +597,7 @@ impl App {
                 (&mut self.episodes_state, len)
             }
             View::Search => (&mut self.search_state, self.search_results.len()),
-            View::Downloads => (&mut self.downloads_state, self.torrents.len()),
+            View::Downloads | View::MoveDialog => (&mut self.downloads_state, self.torrents.len()),
         };
 
         if len == 0 {
@@ -469,7 +616,7 @@ impl App {
             View::Library => &mut self.library_state,
             View::Episodes => &mut self.episodes_state,
             View::Search => &mut self.search_state,
-            View::Downloads => &mut self.downloads_state,
+            View::Downloads | View::MoveDialog => &mut self.downloads_state,
         };
 
         let next = match state.selected() {
@@ -513,9 +660,25 @@ impl App {
         let show_id = show.id.clone();
         let episode_number = episode.number;
 
+        // Check if file is compressed and decompress to temp if needed
+        let (play_path, temp_path) = if compression::is_compressed(&path) {
+            info!(path = %path.display(), "Decompressing episode for playback");
+            let temp = compression::decompress_to_temp(&path)?;
+            (temp.clone(), Some(temp))
+        } else {
+            (path, None)
+        };
+
         let mut player = MpvPlayer::new(self.config.player.mpv.args.clone());
-        player.play(&path, start_pos)?;
+        player.play(&play_path, start_pos)?;
         player.wait()?;
+
+        // Clean up temp file if we decompressed
+        if let Some(temp) = temp_path {
+            if let Some(parent) = temp.parent() {
+                let _ = std::fs::remove_dir_all(parent);
+            }
+        }
 
         self.library.mark_watched(&show_id, episode_number);
         self.library.save()?;
@@ -712,6 +875,345 @@ impl App {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         self.refresh_torrent_list();
+    }
+
+    fn open_move_dialog(&mut self) {
+        let Some(idx) = self.downloads_state.selected() else {
+            return;
+        };
+        let Some(torrent) = self.torrents.get(idx) else {
+            return;
+        };
+
+        // Only allow moving completed torrents
+        if torrent.progress < 1.0 {
+            debug!("Cannot move incomplete torrent");
+            return;
+        }
+
+        let content_path = Path::new(&torrent.content_path);
+        
+        // Find the actual video file
+        let video_path = if content_path.is_file() {
+            content_path.to_path_buf()
+        } else if content_path.is_dir() {
+            match find_video_in_dir(content_path) {
+                Ok(p) => p,
+                Err(_) => return,
+            }
+        } else {
+            return;
+        };
+
+        let original_filename = video_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&torrent.name);
+        
+        let clean_name = clean_filename(original_filename);
+        let media_dirs: Vec<PathBuf> = self.config.expanded_media_dirs();
+
+        self.move_dialog = MoveDialogState {
+            step: MoveDialogStep::SelectMediaDir,
+            torrent_idx: idx,
+            media_dirs: media_dirs.clone(),
+            media_dir_state: {
+                let mut state = ListState::default();
+                if !media_dirs.is_empty() {
+                    state.select(Some(0));
+                }
+                state
+            },
+            selected_media_dir: None,
+            shows_in_dir: Vec::new(),
+            show_state: ListState::default(),
+            selected_show: None,
+            new_show_name: String::new(),
+            creating_new: false,
+            filename: clean_name,
+            original_path: video_path,
+        };
+
+        self.view = View::MoveDialog;
+    }
+
+    fn handle_move_dialog_input(&mut self, key: KeyCode) -> Result<()> {
+        match self.move_dialog.step {
+            MoveDialogStep::SelectMediaDir => {
+                match key {
+                    KeyCode::Esc => {
+                        self.view = View::Downloads;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        let len = self.move_dialog.media_dirs.len();
+                        if len > 0 {
+                            let next = self.move_dialog.media_dir_state.selected()
+                                .map(|i| (i + 1).min(len - 1))
+                                .unwrap_or(0);
+                            self.move_dialog.media_dir_state.select(Some(next));
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        let next = self.move_dialog.media_dir_state.selected()
+                            .map(|i| i.saturating_sub(1))
+                            .unwrap_or(0);
+                        self.move_dialog.media_dir_state.select(Some(next));
+                    }
+                    KeyCode::Enter => {
+                        if let Some(idx) = self.move_dialog.media_dir_state.selected() {
+                            if let Some(dir) = self.move_dialog.media_dirs.get(idx).cloned() {
+                                self.move_dialog.selected_media_dir = Some(dir.clone());
+                                
+                                // Load shows in this directory
+                                let mut shows = list_subdirs(&dir);
+                                shows.sort();
+                                self.move_dialog.shows_in_dir = shows;
+                                
+                                self.move_dialog.show_state = ListState::default();
+                                if !self.move_dialog.shows_in_dir.is_empty() {
+                                    self.move_dialog.show_state.select(Some(0));
+                                }
+                                
+                                self.move_dialog.step = MoveDialogStep::SelectShow;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            MoveDialogStep::SelectShow => {
+                if self.move_dialog.creating_new {
+                    // Text input mode for new folder name
+                    match key {
+                        KeyCode::Esc => {
+                            self.move_dialog.creating_new = false;
+                            self.move_dialog.new_show_name.clear();
+                        }
+                        KeyCode::Enter => {
+                            if !self.move_dialog.new_show_name.is_empty() {
+                                self.move_dialog.selected_show = Some(self.move_dialog.new_show_name.clone());
+                                self.move_dialog.step = MoveDialogStep::EditFilename;
+                                self.move_dialog.creating_new = false;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            self.move_dialog.new_show_name.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            self.move_dialog.new_show_name.push(c);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key {
+                        KeyCode::Esc => {
+                            self.move_dialog.step = MoveDialogStep::SelectMediaDir;
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            let len = self.move_dialog.shows_in_dir.len();
+                            if len > 0 {
+                                let next = self.move_dialog.show_state.selected()
+                                    .map(|i| (i + 1).min(len - 1))
+                                    .unwrap_or(0);
+                                self.move_dialog.show_state.select(Some(next));
+                            }
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            let next = self.move_dialog.show_state.selected()
+                                .map(|i| i.saturating_sub(1))
+                                .unwrap_or(0);
+                            self.move_dialog.show_state.select(Some(next));
+                        }
+                        KeyCode::Char('n') => {
+                            self.move_dialog.creating_new = true;
+                            self.move_dialog.new_show_name.clear();
+                        }
+                        KeyCode::Enter => {
+                            if let Some(idx) = self.move_dialog.show_state.selected() {
+                                if let Some(show) = self.move_dialog.shows_in_dir.get(idx).cloned() {
+                                    self.move_dialog.selected_show = Some(show);
+                                    self.move_dialog.step = MoveDialogStep::EditFilename;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            MoveDialogStep::EditFilename => {
+                match key {
+                    KeyCode::Esc => {
+                        self.move_dialog.step = MoveDialogStep::SelectShow;
+                    }
+                    KeyCode::Enter => {
+                        self.execute_move()?;
+                    }
+                    KeyCode::Backspace => {
+                        self.move_dialog.filename.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        self.move_dialog.filename.push(c);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn render_move_dialog(&self, frame: &mut Frame) {
+        use ratatui::{
+            layout::{Alignment, Constraint, Flex, Layout, Rect},
+            style::{Modifier, Style},
+            text::{Line, Span},
+            widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+        };
+
+        let area = frame.area();
+        
+        // Center a dialog box
+        let dialog_width = 60.min(area.width.saturating_sub(4));
+        let dialog_height = 15.min(area.height.saturating_sub(4));
+        
+        let horizontal = Layout::horizontal([Constraint::Length(dialog_width)]).flex(Flex::Center);
+        let vertical = Layout::vertical([Constraint::Length(dialog_height)]).flex(Flex::Center);
+        let [dialog_area] = vertical.areas(area);
+        let [dialog_area] = horizontal.areas(dialog_area);
+
+        frame.render_widget(Clear, dialog_area);
+
+        let title = match self.move_dialog.step {
+            MoveDialogStep::SelectMediaDir => "Move to Library - Select Destination",
+            MoveDialogStep::SelectShow => {
+                if self.move_dialog.creating_new {
+                    "Move to Library - New Folder Name"
+                } else {
+                    "Move to Library - Select Show Folder"
+                }
+            }
+            MoveDialogStep::EditFilename => "Move to Library - Edit Filename",
+        };
+
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.accent));
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        match self.move_dialog.step {
+            MoveDialogStep::SelectMediaDir => {
+                let items: Vec<ListItem> = self.move_dialog.media_dirs
+                    .iter()
+                    .map(|p| ListItem::new(p.display().to_string()))
+                    .collect();
+
+                let list = List::new(items)
+                    .highlight_style(Style::default().fg(self.accent).add_modifier(Modifier::BOLD))
+                    .highlight_symbol("> ");
+
+                frame.render_stateful_widget(list, inner, &mut self.move_dialog.media_dir_state.clone());
+            }
+            MoveDialogStep::SelectShow => {
+                if self.move_dialog.creating_new {
+                    let input_text = format!("> {}_", self.move_dialog.new_show_name);
+                    let para = Paragraph::new(input_text)
+                        .style(Style::default().fg(self.accent));
+                    frame.render_widget(para, inner);
+                } else {
+                    let mut items: Vec<ListItem> = self.move_dialog.shows_in_dir
+                        .iter()
+                        .map(|s| ListItem::new(format!("  {}/", s)))
+                        .collect();
+                    
+                    if items.is_empty() {
+                        items.push(ListItem::new(Line::from(vec![
+                            Span::styled("(empty - press ", Style::default().fg(Color::DarkGray)),
+                            Span::styled("n", Style::default().fg(self.accent)),
+                            Span::styled(" to create new)", Style::default().fg(Color::DarkGray)),
+                        ])));
+                    }
+
+                    let list = List::new(items)
+                        .highlight_style(Style::default().fg(self.accent).add_modifier(Modifier::BOLD))
+                        .highlight_symbol("> ");
+
+                    frame.render_stateful_widget(list, inner, &mut self.move_dialog.show_state.clone());
+                }
+            }
+            MoveDialogStep::EditFilename => {
+                let dest_path = self.move_dialog.selected_media_dir.as_ref()
+                    .map(|p| p.join(self.move_dialog.selected_show.as_ref().unwrap_or(&String::new())))
+                    .unwrap_or_default();
+
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled("Destination: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(dest_path.display().to_string()),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("Filename: ", Style::default().fg(Color::DarkGray)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(format!("{}_", self.move_dialog.filename), Style::default().fg(self.accent)),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("Press Enter to confirm, Esc to go back", Style::default().fg(Color::DarkGray)),
+                    ]),
+                ];
+
+                let para = Paragraph::new(lines);
+                frame.render_widget(para, inner);
+            }
+        }
+    }
+
+    fn execute_move(&mut self) -> Result<()> {
+        let Some(media_dir) = &self.move_dialog.selected_media_dir else {
+            return Ok(());
+        };
+        let Some(show_name) = &self.move_dialog.selected_show else {
+            return Ok(());
+        };
+
+        let dest_dir = media_dir.join(show_name);
+        
+        // Create directory if it doesn't exist
+        if !dest_dir.exists() {
+            std::fs::create_dir_all(&dest_dir)?;
+        }
+
+        let dest_path = dest_dir.join(&self.move_dialog.filename);
+        let source_path = &self.move_dialog.original_path;
+
+        debug!(
+            source = %source_path.display(),
+            dest = %dest_path.display(),
+            "Moving file"
+        );
+
+        // Try rename first (same filesystem), fall back to copy+delete
+        if std::fs::rename(source_path, &dest_path).is_err() {
+            std::fs::copy(source_path, &dest_path)?;
+            std::fs::remove_file(source_path)?;
+        }
+
+        // Compress if enabled
+        if self.config.general.compress_episodes {
+            info!(path = %dest_path.display(), "Compressing episode");
+            compression::compress_file(&dest_path, self.config.general.compression_level)?;
+        }
+
+        // Refresh library to pick up the new file
+        self.refresh_library()?;
+
+        // Go back to downloads view
+        self.view = View::Downloads;
+
+        Ok(())
     }
 }
 

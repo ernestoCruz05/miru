@@ -44,3 +44,9 @@ base64 = "0.22"
 
 # JSON (for RPC APIs)
 serde_json = "1"
+
+# Compression
+zstd = "0.13"
+
+# Temp files
+tempfile = "3"

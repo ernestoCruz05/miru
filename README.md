@@ -11,6 +11,7 @@ A terminal-based anime library manager written in Rust.
 - **Nyaa.si Search**: Search and download anime torrents directly from the app
 - **Torrent Integration**: Supports qBittorrent and Transmission clients
 - **mpv Playback**: Play episodes with mpv, with customizable arguments
+- **Episode Compression**: Compress episodes with zstd to save disk space, with transparent decompression on playback
 
 ## Installation
 
@@ -37,6 +38,8 @@ Configuration is stored at `~/.config/miru/config.toml`:
 ```toml
 [general]
 media_dirs = ["~/Anime", "/mnt/media/Anime"]
+compress_episodes = false  # Enable zstd compression for episodes
+compression_level = 3      # 1-19, higher = smaller files but slower
 
 [player.mpv]
 args = ["--fullscreen"]

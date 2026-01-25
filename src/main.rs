@@ -1,4 +1,5 @@
 mod app;
+mod compression;
 mod config;
 mod error;
 mod library;

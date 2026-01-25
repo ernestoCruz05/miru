@@ -21,6 +21,10 @@ pub struct Config {
 pub struct GeneralConfig {
     pub media_dirs: Vec<PathBuf>,
     pub player: String,
+    #[serde(default)]
+    pub compress_episodes: bool,
+    #[serde(default = "default_compression_level")]
+    pub compression_level: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +77,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_compression_level() -> i32 {
+    3 // zstd default, good balance of speed/ratio
+}
+
 fn default_accent_color() -> String {
     "magenta".to_string()
 }
@@ -97,6 +105,8 @@ impl Default for GeneralConfig {
         Self {
             media_dirs: vec![default_media_dir],
             player: "mpv".to_string(),
+            compress_episodes: false,
+            compression_level: default_compression_level(),
         }
     }
 }
