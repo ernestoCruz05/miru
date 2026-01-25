@@ -1,0 +1,46 @@
+[package]
+name = "miru"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Error handling
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+directories = "6"
+regex = "1"
+
+# HTTP client (Phase 2)
+reqwest = { version = "0.12", features = ["json", "cookies"] }
+
+# HTML parsing (Phase 2 - nyaa scraping)
+scraper = "0.22"
+
+# URL encoding
+urlencoding = "2"
+
+# Human-readable sizes
+humansize = "2"
+
+# Base64 encoding (for Transmission auth)
+base64 = "0.22"
+
+# JSON (for RPC APIs)
+serde_json = "1"

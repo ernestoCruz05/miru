@@ -1,0 +1,12 @@
+# Build artifacts
+/target
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project docs
+src/CLAUDE.md
