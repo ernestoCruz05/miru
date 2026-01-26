@@ -16,7 +16,7 @@ fn get_batch_patterns() -> &'static Vec<Regex> {
             Regex::new(r"(?i)\[batch\]").unwrap(),           // [Batch] tag
             Regex::new(r"(?i)\bcomplete\b").unwrap(),        // "Complete" word
             Regex::new(r"(?i)\bseason\s+\d+\b").unwrap(),    // "Season 1"
-            Regex::new(r"\bS\d{2}\b(?!E\d{2})").unwrap(),    // S01 without E01 (season pack)
+            Regex::new(r"\bS\d{2}\b").unwrap(),    // S01 without E01 (season pack)
             Regex::new(r"(?i)\d+-\d+\s*(?:END|FINAL)").unwrap(), // Episode range (01-12 END)
         ]
     })
