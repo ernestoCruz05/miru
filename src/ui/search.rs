@@ -155,13 +155,13 @@ fn render_search_results(
         return;
     }
 
-    // Account for: seeders (4) + separator (3) + size (9) + separator (3) + highlight symbol (2) + padding (2) = 23
-    let title_width = area.width.saturating_sub(23) as usize;
+    // Layout: star (2) + seeders (4) + sep (3) + size (9) + sep (3) + [BATCH] (8) + sep (3) + highlight (2) + padding (2) = 36
+    let title_width = area.width.saturating_sub(36) as usize;
 
     let items: Vec<ListItem> = results
         .iter()
         .map(|r| {
-            // Color seeders based on health
+            // Color seeders based on health, but trusted overrides to LightGreen
             let seeder_color = if r.seeders >= 50 {
                 Color::Green
             } else if r.seeders >= 10 {
@@ -172,18 +172,49 @@ fn render_search_results(
                 Color::DarkGray
             };
 
+            // Trusted torrents get LightGreen seeder color override
+            let seeder_style = if r.is_trusted {
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(seeder_color)
+                    .add_modifier(Modifier::BOLD)
+            };
+
+            // Trust indicator: green star for trusted, space placeholder for others
+            let trust_indicator = if r.is_trusted {
+                Span::styled("★ ", Style::default().fg(Color::LightGreen))
+            } else {
+                Span::raw("  ")
+            };
+
+            // Batch indicator: [BATCH] tag or empty placeholder
+            let batch_indicator = if r.is_batch {
+                Span::styled("[BATCH] ", Style::default().fg(Color::LightYellow))
+            } else {
+                Span::raw("        ") // 8 chars for alignment
+            };
+
+            // Dim non-trusted, non-batch entries for visual contrast
+            let title_style = if r.is_trusted || r.is_batch {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+
             let line = Line::from(vec![
-                Span::styled(
-                    format!("{:>4}", r.seeders),
-                    Style::default().fg(seeder_color).add_modifier(Modifier::BOLD),
-                ),
+                trust_indicator,
+                Span::styled(format!("{:>4}", r.seeders), seeder_style),
                 Span::raw(" │ "),
                 Span::styled(
                     format!("{:>9}", r.size),
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::raw(" │ "),
-                Span::raw(truncate_title(&r.title, title_width)),
+                batch_indicator,
+                Span::styled(truncate_title(&r.title, title_width), title_style),
             ]);
 
             ListItem::new(line)
