@@ -5,10 +5,65 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
+use regex::Regex;
 
 use crate::nyaa::{NyaaCategory, NyaaFilter, NyaaResult};
 
 use super::widgets::titled_block;
+
+fn truncate_title(title: &str, max_width: usize) -> String {
+    if title.is_empty() {
+        return "Unknown".to_string();
+    }
+
+    if max_width <= 3 {
+        return "...".to_string();
+    }
+
+    if title.len() <= max_width {
+        return title.to_string();
+    }
+
+    // Episode patterns: - 01, E01, EP01, Episode 5, S01E05
+    let episode_patterns = [
+        r"- (\d{2,3})",              // " - 01", " - 123"
+        r"\bE(\d{2,3})\b",           // "E01", "E123"
+        r"\bEP(\d{2,3})\b",          // "EP01", "EP123"
+        r"\bEpisode (\d+)\b",        // "Episode 5"
+        r"\b(S\d+E\d+)\b",           // "S01E05"
+    ];
+
+    // Try to find episode info
+    for pattern in &episode_patterns {
+        if let Ok(re) = Regex::new(pattern) {
+            if let Some(cap) = re.find(title) {
+                let episode_start = cap.start();
+                let episode_end = cap.end();
+                let episode_part = &title[episode_start..episode_end];
+
+                // Calculate how much title we can keep before the episode
+                // Reserve space for "..." + episode_part
+                let reserved = 3 + episode_part.len();
+                if reserved >= max_width {
+                    // Can't fit everything, just show truncated episode
+                    return format!("...{}", episode_part);
+                }
+
+                let available_for_title = max_width - reserved;
+                let title_prefix = if episode_start > available_for_title {
+                    &title[..available_for_title]
+                } else {
+                    &title[..episode_start]
+                };
+
+                return format!("{}...{}", title_prefix.trim_end(), episode_part);
+            }
+        }
+    }
+
+    // No episode pattern found, simple truncation
+    format!("{}...", &title[..max_width - 3])
+}
 
 pub fn render_search_view(
     frame: &mut Frame,
@@ -100,6 +155,9 @@ fn render_search_results(
         return;
     }
 
+    // Account for: seeders (4) + separator (3) + size (9) + separator (3) + highlight symbol (2) + padding (2) = 23
+    let title_width = area.width.saturating_sub(23) as usize;
+
     let items: Vec<ListItem> = results
         .iter()
         .map(|r| {
@@ -125,7 +183,7 @@ fn render_search_results(
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::raw(" │ "),
-                Span::raw(&r.title),
+                Span::raw(truncate_title(&r.title, title_width)),
             ]);
 
             ListItem::new(line)
