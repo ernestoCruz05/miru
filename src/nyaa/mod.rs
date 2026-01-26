@@ -1,9 +1,43 @@
+use regex::Regex;
 use scraper::{Html, Selector};
+use std::sync::OnceLock;
 use tracing::debug;
 
 use crate::error::{Error, Result};
 
 const NYAA_BASE_URL: &str = "https://nyaa.si";
+
+// Batch detection patterns - compiled once via OnceLock
+static BATCH_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+
+fn get_batch_patterns() -> &'static Vec<Regex> {
+    BATCH_PATTERNS.get_or_init(|| {
+        vec![
+            Regex::new(r"(?i)\[batch\]").unwrap(),           // [Batch] tag
+            Regex::new(r"(?i)\bcomplete\b").unwrap(),        // "Complete" word
+            Regex::new(r"(?i)\bseason\s+\d+\b").unwrap(),    // "Season 1"
+            Regex::new(r"\bS\d{2}\b(?!E\d{2})").unwrap(),    // S01 without E01 (season pack)
+            Regex::new(r"(?i)\d+-\d+\s*(?:END|FINAL)").unwrap(), // Episode range (01-12 END)
+        ]
+    })
+}
+
+/// Parse size string to MB for batch heuristics
+fn parse_size_mb(size_str: &str) -> f64 {
+    let parts: Vec<&str> = size_str.split_whitespace().collect();
+    if parts.len() != 2 {
+        return 0.0;
+    }
+
+    let value: f64 = parts[0].parse().unwrap_or(0.0);
+    match parts[1].to_uppercase().as_str() {
+        "KIB" => value / 1024.0,
+        "MIB" => value,
+        "GIB" => value * 1024.0,
+        "TIB" => value * 1024.0 * 1024.0,
+        _ => 0.0,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct NyaaResult {
@@ -16,6 +50,8 @@ pub struct NyaaResult {
     pub torrent_url: String,
     pub magnet_link: String,
     pub date: String,
+    pub is_trusted: bool,
+    pub is_batch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +216,10 @@ impl NyaaClient {
         let mut results = Vec::new();
 
         for row in document.select(&row_selector) {
+            // Extract row class to detect trusted uploaders (green rows on nyaa.si)
+            let row_class = row.value().attr("class").unwrap_or("default");
+            let is_trusted = row_class.contains("success");
+
             let cells: Vec<_> = row.select(&cell_selector).collect();
 
             // Nyaa table structure:
@@ -247,6 +287,10 @@ impl NyaaClient {
                 .parse()
                 .unwrap_or(0);
 
+            // Batch detection: title patterns OR size > 5GB (conservative threshold)
+            let is_batch = get_batch_patterns().iter().any(|re| re.is_match(&title))
+                || parse_size_mb(&size) > 5120.0;
+
             results.push(NyaaResult {
                 title,
                 category,
@@ -257,6 +301,8 @@ impl NyaaClient {
                 torrent_url,
                 magnet_link,
                 date,
+                is_trusted,
+                is_batch,
             });
         }
 
