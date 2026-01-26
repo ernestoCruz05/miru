@@ -286,7 +286,7 @@ impl NyaaClient {
                 .filter(|a| {
                     a.attr("href").is_some_and(|h| {
                         // Direct /view/ID links only (exclude query-param comment links)
-                        h.starts_with("/view/") && !h.contains('?')
+                        h.starts_with("/view/") && !h.contains('?') && !h.contains('#')
                     })
                 })
                 .next()
