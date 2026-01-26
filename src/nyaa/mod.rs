@@ -200,7 +200,12 @@ impl NyaaClient {
             let name_cell = &cells[1];
             let title = name_cell
                 .select(&link_selector)
-                .filter(|a| a.attr("href").is_some_and(|h| h.starts_with("/view/")))
+                .filter(|a| {
+                    a.attr("href").is_some_and(|h| {
+                        // Direct /view/ID links only (exclude query-param comment links)
+                        h.starts_with("/view/") && !h.contains('?')
+                    })
+                })
                 .next()
                 .map(|a| a.text().collect::<String>().trim().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
