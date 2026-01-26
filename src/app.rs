@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::thread;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::Color,
@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::library::Library;
 use crate::nyaa::{NyaaCategory, NyaaClient, NyaaFilter, NyaaResult};
-use crate::player::MpvPlayer;
+use crate::player::ExternalPlayer;
 use crate::torrent::{AnyTorrentClient, QBittorrentClient, TransmissionClient, TorrentStatus};
 use crate::ui::{
     render_downloads_view, render_episodes_view, render_library_view, render_search_view, widgets,
@@ -204,6 +204,9 @@ pub struct App {
     // Search view state
     pub search_query: String,
     pub search_results: Vec<NyaaResult>,
+    pub filtered_search_results: Vec<usize>, // Indices of filtered results
+    pub search_filter_input: String,
+    pub is_filtering: bool,
     pub search_state: ListState,
     pub search_loading: bool,
     pub search_category: NyaaCategory,
@@ -252,6 +255,9 @@ impl App {
 
             search_query: String::new(),
             search_results: Vec::new(),
+            filtered_search_results: Vec::new(),
+            search_filter_input: String::new(),
+            is_filtering: false,
             search_state: ListState::default(),
             search_loading: false,
             search_category: NyaaCategory::AnimeEnglish, // Default to English subs
@@ -288,7 +294,9 @@ impl App {
                 AppMessage::SearchResults(results) => {
                     self.search_loading = false;
                     self.search_results = results;
-                    if !self.search_results.is_empty() {
+                    // Initialize filtered results with everything
+                    self.filtered_search_results = (0..self.search_results.len()).collect();
+                    if !self.filtered_search_results.is_empty() {
                         self.search_state.select(Some(0));
                     }
                 }
@@ -431,6 +439,9 @@ impl App {
     async fn handle_events(&mut self) -> Result<()> {
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    return Ok(());
+                }
                 // Global quit with Ctrl+C
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
                 {
@@ -508,47 +519,102 @@ impl App {
     }
 
     fn handle_search_input(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Esc => {
-                self.view = View::Library;
-            }
-            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.running = false;
-            }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Cycle category
-                self.search_category = self.search_category.next();
-            }
-            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Cycle filter
-                self.search_filter = self.search_filter.next();
-            }
-            KeyCode::Char(c) => {
-                self.search_query.push(c);
-            }
-            KeyCode::Backspace => {
-                self.search_query.pop();
-            }
-            KeyCode::Enter => {
-                if self.search_results.is_empty() || self.search_state.selected().is_none() {
-                    // Perform search
-                    self.perform_search();
-                } else {
-                    // Download selected torrent
-                    self.download_selected_torrent();
+        if self.is_filtering {
+            match key.code {
+                KeyCode::Esc => {
+                    self.is_filtering = false;
+                    self.search_filter_input.clear();
+                    self.update_filtered_results();
                 }
-            }
-            KeyCode::Tab | KeyCode::Down => {
-                if !self.search_results.is_empty() {
-                    self.move_selection_down(&View::Search);
+                KeyCode::Enter => {
+                    // Confirm filter (keep it active but exit edit mode? Or just stay?)
+                    // For fzf style, Enter usually selects the top item. 
+                    // Let's say Enter selects the currently highlighted item as usual.
+                    if !self.filtered_search_results.is_empty() {
+                         self.download_selected_torrent();
+                    }
                 }
+                 KeyCode::Backspace => {
+                    self.search_filter_input.pop();
+                    self.update_filtered_results();
+                }
+                KeyCode::Char(c) => {
+                    self.search_filter_input.push(c);
+                    self.update_filtered_results();
+                }
+                KeyCode::Up => self.move_selection_up(&View::Search),
+                KeyCode::Down => self.move_selection_down(&View::Search),
+                _ => {}
             }
-            KeyCode::Up => {
-                self.move_selection_up(&View::Search);
+        } else {
+            match key.code {
+                KeyCode::Esc => {
+                    self.view = View::Library;
+                }
+                KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.running = false;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Cycle category
+                    self.search_category = self.search_category.next();
+                }
+                KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Cycle filter
+                    self.search_filter = self.search_filter.next();
+                }
+                // Enter filter mode with /
+                KeyCode::Char('/') if !self.search_results.is_empty() => {
+                    self.is_filtering = true;
+                    self.search_filter_input.clear();
+                    self.update_filtered_results();
+                }
+                KeyCode::Backspace => {
+                    self.search_query.pop();
+                }
+                KeyCode::Enter => {
+                    if self.search_results.is_empty() {
+                        // Perform search
+                        self.perform_search();
+                    } else {
+                        // Download selected torrent
+                        self.download_selected_torrent();
+                    }
+                }
+                KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => {
+                    if !self.search_results.is_empty() {
+                        self.move_selection_down(&View::Search);
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k')  => {
+                    self.move_selection_up(&View::Search);
+                }
+                KeyCode::Char(c) => {
+                    self.search_query.push(c);
+                }
+                _ => {}
             }
-            _ => {}
         }
         Ok(())
+    }
+
+    fn update_filtered_results(&mut self) {
+        if self.search_filter_input.is_empty() {
+            self.filtered_search_results = (0..self.search_results.len()).collect();
+        } else {
+            let filter_lower = self.search_filter_input.to_lowercase();
+            self.filtered_search_results = self.search_results
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.title.to_lowercase().contains(&filter_lower))
+                .map(|(i, _)| i)
+                .collect();
+        }
+        // Reset selection if list changed
+        if !self.filtered_search_results.is_empty() {
+            self.search_state.select(Some(0));
+        } else {
+            self.search_state.select(None);
+        }
     }
 
     async fn handle_downloads_input(&mut self, key: KeyCode) -> Result<()> {
@@ -596,7 +662,7 @@ impl App {
                     .unwrap_or(0);
                 (&mut self.episodes_state, len)
             }
-            View::Search => (&mut self.search_state, self.search_results.len()),
+            View::Search => (&mut self.search_state, self.filtered_search_results.len()),
             View::Downloads | View::MoveDialog => (&mut self.downloads_state, self.torrents.len()),
         };
 
@@ -612,18 +678,33 @@ impl App {
     }
 
     fn move_selection_up(&mut self, view: &View) {
-        let state = match view {
-            View::Library => &mut self.library_state,
-            View::Episodes => &mut self.episodes_state,
-            View::Search => &mut self.search_state,
-            View::Downloads | View::MoveDialog => &mut self.downloads_state,
+        let (state, len) = match view {
+            View::Library => (&mut self.library_state, self.library.shows.len()),
+            View::Episodes => {
+                let len = self
+                    .selected_show_idx
+                    .and_then(|i| self.library.shows.get(i))
+                    .map(|s| s.episodes.len())
+                    .unwrap_or(0);
+                (&mut self.episodes_state, len)
+            }
+            View::Search => (&mut self.search_state, self.filtered_search_results.len()),
+            View::Downloads | View::MoveDialog => (&mut self.downloads_state, self.torrents.len()),
         };
 
-        let next = match state.selected() {
-            Some(i) => i.saturating_sub(1),
-            None => 0,
-        };
-        state.select(Some(next));
+        if len > 0 {
+            let i = match state.selected() {
+                Some(i) => {
+                    if i == 0 {
+                        len - 1
+                    } else {
+                        i - 1
+                    }
+                }
+                None => 0,
+            };
+            state.select(Some(i));
+        }
     }
 
     fn enter_show(&mut self) {
@@ -669,7 +750,18 @@ impl App {
             (path, None)
         };
 
-        let mut player = MpvPlayer::new(self.config.player.mpv.args.clone());
+        let player_cmd = self.config.general.player.clone();
+        
+        // Select logic for args based on player name (fallback to mpv args if exact match not found for vlc)
+        // Check if user has specific config for this player
+        let args = if player_cmd == "vlc" {
+             self.config.player.vlc.as_ref().map(|p| p.args.clone()).unwrap_or_else(|| vec!["--fullscreen".to_string()])
+        } else {
+             // Default to mpv args or empty if unknown
+             self.config.player.mpv.args.clone()
+        };
+
+        let mut player = ExternalPlayer::new(player_cmd, args);
         player.play(&play_path, start_pos)?;
         player.wait()?;
 
@@ -684,6 +776,44 @@ impl App {
         self.library.save()?;
 
         Ok(())
+    }
+
+    fn download_selected_torrent(&mut self) {
+        let Some(idx) = self.search_state.selected() else {
+            return;
+        };
+        
+        // Map filtered index to real index if filtering
+        let result_idx = if !self.filtered_search_results.is_empty() {
+            *self.filtered_search_results.get(idx).unwrap_or(&idx)
+        } else {
+             idx
+        };
+
+        let Some(result) = self.search_results.get(result_idx) else {
+            return;
+        };
+
+        if let Some(client) = self.torrent_client.clone() {
+            let magnet = result.magnet_link.clone();
+            let tx = self.msg_tx.clone();
+            
+            info!(title = %result.title, "Adding torrent");
+
+            tokio::spawn(async move {
+                match client.add_magnet(&magnet).await {
+                    Ok(hash) => {
+                        let _ = tx.send(AppMessage::TorrentAdded(hash));
+                    }
+                    Err(e) => {
+                        error!("Failed to add torrent: {}", e);
+                    }
+                }
+            });
+            
+            // Switch to downloads view to see progress
+            self.view = View::Downloads;
+        }
     }
 
     fn play_selected_download(&mut self) -> Result<()> {
@@ -713,7 +843,15 @@ impl App {
             return Ok(());
         };
 
-        let mut player = MpvPlayer::new(self.config.player.mpv.args.clone());
+        let player_cmd = self.config.general.player.clone();
+         let args = if player_cmd == "vlc" {
+             self.config.player.vlc.as_ref().map(|p| p.args.clone()).unwrap_or_else(|| vec!["--fullscreen".to_string()])
+        } else {
+             // Default to mpv args or empty if unknown
+             self.config.player.mpv.args.clone()
+        };
+
+        let mut player = ExternalPlayer::new(player_cmd, args);
         player.play(&video_path, None)?;
         player.wait()?;
 
@@ -764,7 +902,7 @@ impl App {
         let tx = self.msg_tx.clone();
 
         tokio::spawn(async move {
-            match client.search_with_options(&query, category, filter).await {
+            match client.search(&query, category, filter).await {
                 Ok(results) => {
                     let _ = tx.send(AppMessage::SearchResults(results));
                 }
@@ -775,32 +913,7 @@ impl App {
         });
     }
 
-    fn download_selected_torrent(&mut self) {
-        let Some(idx) = self.search_state.selected() else {
-            return;
-        };
-        let Some(result) = self.search_results.get(idx) else {
-            return;
-        };
-        let Some(client) = self.torrent_client.clone() else {
-            error!("No torrent client configured");
-            return;
-        };
 
-        let magnet = result.magnet_link.clone();
-        let tx = self.msg_tx.clone();
-
-        tokio::spawn(async move {
-            match client.add_magnet(&magnet).await {
-                Ok(hash) => {
-                    let _ = tx.send(AppMessage::TorrentAdded(hash));
-                }
-                Err(e) => {
-                    let _ = tx.send(AppMessage::TorrentError(e.to_string()));
-                }
-            }
-        });
-    }
 
     fn refresh_torrent_list(&mut self) {
         let Some(client) = self.torrent_client.clone() else {
@@ -1063,7 +1176,7 @@ impl App {
 
     fn render_move_dialog(&self, frame: &mut Frame) {
         use ratatui::{
-            layout::{Alignment, Constraint, Flex, Layout, Rect},
+            layout::{Constraint, Flex, Layout},
             style::{Modifier, Style},
             text::{Line, Span},
             widgets::{Block, Borders, Clear, List, ListItem, Paragraph},

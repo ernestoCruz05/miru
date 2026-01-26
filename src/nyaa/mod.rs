@@ -5,6 +5,9 @@ use tracing::debug;
 
 use crate::error::{Error, Result};
 
+mod smart_search;
+pub use smart_search::{smart_search, rank_results};
+
 const NYAA_BASE_URL: &str = "https://nyaa.si";
 
 // Batch detection patterns - compiled once via OnceLock
@@ -172,9 +175,49 @@ impl NyaaClient {
         self
     }
 
-    /// Search nyaa.si for torrents matching the query
-    pub async fn search(&self, query: &str) -> Result<Vec<NyaaResult>> {
-        self.search_with_options(query, self.category, self.filter).await
+    /// Search nyaa.si for torrents matching the query using smart query parsing
+    pub async fn search(&self, query: &str, category: NyaaCategory, filter: NyaaFilter) -> Result<Vec<NyaaResult>> {
+        let search_query = smart_search(query);
+        let mut all_results = Vec::new();
+        let mut seen_magnets = std::collections::HashSet::new();
+
+        // Create an iterator of all queries to try (primary + alternatives)
+        let queries = std::iter::once(&search_query.primary)
+            .chain(search_query.alternatives.iter());
+
+        for query_str in queries {
+            debug!(query = %query_str, "Trying search query");
+            
+            match self.search_with_options(query_str, category, filter).await {
+                Ok(results) => {
+                    let mut count = 0;
+                    for result in results {
+                         // Only add unique results based on magnet link
+                        if seen_magnets.insert(result.magnet_link.clone()) {
+                            all_results.push(result);
+                            count += 1;
+                        }
+                    }
+
+                    // Heuristics to stop searching:
+                    // 1. If we found some results for this query AND we have enough total results (15+)
+                    // 2. OR if we have a lot of results (30+) regardless of this specific query
+                    if (count > 0 && all_results.len() >= 15) || all_results.len() >= 30 {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    debug!(error = %e, query = %query_str, "Search query failed");
+                    // Continue to next alternative on error
+                    continue;
+                }
+            }
+        }
+
+        // Rank results
+        rank_results(&mut all_results, &search_query.parsed, |r| &r.title);
+
+        Ok(all_results)
     }
 
     /// Search nyaa.si with specific category and filter options
