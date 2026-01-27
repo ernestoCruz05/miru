@@ -7,7 +7,7 @@ use ratatui::{
 };
 use regex::Regex;
 
-use crate::nyaa::{NyaaCategory, NyaaFilter, NyaaResult};
+use crate::nyaa::{NyaaCategory, NyaaFilter, NyaaResult, NyaaSort};
 
 use super::widgets::titled_block;
 
@@ -74,6 +74,7 @@ pub fn render_search_view(
     is_loading: bool,
     category: NyaaCategory,
     filter: NyaaFilter,
+    sort: NyaaSort,
     accent: Color,
 ) {
     let chunks = Layout::default()
@@ -89,7 +90,7 @@ pub fn render_search_view(
     render_search_input(frame, chunks[0], query, is_loading, accent);
 
     // Filter bar
-    render_filter_bar(frame, chunks[1], category, filter);
+    render_filter_bar(frame, chunks[1], category, filter, sort);
 
     // Results list
     render_search_results(frame, chunks[2], results, list_state, accent);
@@ -118,7 +119,7 @@ fn render_search_input(frame: &mut Frame, area: Rect, query: &str, is_loading: b
     frame.set_cursor_position((area.x + query.len() as u16 + 1, area.y + 1));
 }
 
-fn render_filter_bar(frame: &mut Frame, area: Rect, category: NyaaCategory, filter: NyaaFilter) {
+fn render_filter_bar(frame: &mut Frame, area: Rect, category: NyaaCategory, filter: NyaaFilter, sort: NyaaSort) {
     let line = Line::from(vec![
         Span::raw(" "),
         Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
@@ -133,6 +134,13 @@ fn render_filter_bar(frame: &mut Frame, area: Rect, category: NyaaCategory, filt
         Span::styled(
             format!("[{}]", filter.as_display()),
             Style::default().fg(Color::Yellow),
+        ),
+        Span::raw("  "),
+        Span::styled("s", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(":Sort "),
+        Span::styled(
+            format!("[{}]", sort.as_display()),
+            Style::default().fg(Color::LightMagenta),
         ),
     ]);
 

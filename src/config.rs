@@ -30,11 +30,13 @@ pub struct GeneralConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerConfig {
     #[serde(default)]
-    pub mpv: MpvConfig,
+    pub mpv: PlayerProfile,
+    #[serde(default)]
+    pub vlc: Option<PlayerProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MpvConfig {
+pub struct PlayerProfile {
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default = "default_true")]
@@ -100,7 +102,7 @@ impl Default for GeneralConfig {
     fn default() -> Self {
         let default_media_dir = data_dir()
             .map(|d| d.join("shows"))
-            .unwrap_or_else(|_| PathBuf::from("~/.local/share/miru/shows"));
+            .unwrap_or_else(|_| PathBuf::from("shows"));
 
         Self {
             media_dirs: vec![default_media_dir],
@@ -111,27 +113,34 @@ impl Default for GeneralConfig {
     }
 }
 
-impl Default for PlayerConfig {
-    fn default() -> Self {
-        Self {
-            mpv: MpvConfig::default(),
-        }
-    }
-}
-
-impl Default for MpvConfig {
-    fn default() -> Self {
-        Self {
-            args: vec!["--fullscreen".to_string()],
-            track_progress: true,
-        }
-    }
-}
-
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
             accent_color: default_accent_color(),
+        }
+    }
+}
+
+impl Default for PlayerConfig {
+    fn default() -> Self {
+        Self {
+            mpv: PlayerProfile::default_mpv(),
+            vlc: None,
+        }
+    }
+}
+
+impl Default for PlayerProfile {
+    fn default() -> Self {
+        Self::default_mpv()
+    }
+}
+
+impl PlayerProfile {
+    pub fn default_mpv() -> Self {
+        Self {
+            args: vec!["--fullscreen".to_string()],
+            track_progress: true,
         }
     }
 }
@@ -202,8 +211,13 @@ impl Config {
             .iter()
             .map(|p| {
                 let path_str = p.to_string_lossy();
-                if path_str.starts_with("~/") {
+                // Support both ~/. and ~\ for generic home directory expansion
+                if path_str.starts_with("~/") || path_str.starts_with("~\\") || path_str == "~" {
                     if let Some(home) = dirs_home() {
+                        if path_str == "~" {
+                            return home;
+                        }
+                        // Skip the first 2 chars (~/ or ~\)
                         return home.join(&path_str[2..]);
                     }
                 }

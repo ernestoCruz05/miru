@@ -1,3 +1,3 @@
 mod mpv;
 
-pub use mpv::MpvPlayer;
+pub use mpv::ExternalPlayer;
