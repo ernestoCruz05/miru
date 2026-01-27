@@ -18,7 +18,7 @@ use crate::compression;
 use crate::config::Config;
 use crate::error::Result;
 use crate::library::Library;
-use crate::nyaa::{NyaaCategory, NyaaClient, NyaaFilter, NyaaResult};
+use crate::nyaa::{NyaaCategory, NyaaClient, NyaaFilter, NyaaResult, NyaaSort};
 use crate::player::ExternalPlayer;
 use crate::torrent::{AnyTorrentClient, QBittorrentClient, TransmissionClient, TorrentStatus};
 use crate::ui::{
@@ -211,6 +211,7 @@ pub struct App {
     pub search_loading: bool,
     pub search_category: NyaaCategory,
     pub search_filter: NyaaFilter,
+    pub search_sort: NyaaSort,
 
     // Downloads view state
     pub torrents: Vec<TorrentStatus>,
@@ -262,6 +263,7 @@ impl App {
             search_loading: false,
             search_category: NyaaCategory::AnimeEnglish, // Default to English subs
             search_filter: NyaaFilter::NoFilter,
+            search_sort: NyaaSort::default(),
 
             torrents: Vec::new(),
             downloads_state: ListState::default(),
@@ -346,6 +348,7 @@ impl App {
                     ("/", "search"),
                     ("d", "downloads"),
                     ("r", "refresh"),
+                    ("p", "play next"),
                     ("q", "quit"),
                 ]);
                 frame.render_widget(help, help_area);
@@ -382,6 +385,7 @@ impl App {
                     self.search_loading,
                     self.search_category,
                     self.search_filter,
+                    self.search_sort,
                     self.accent,
                 );
 
@@ -389,6 +393,7 @@ impl App {
                     ("Enter", "search/download"),
                     ("C-c", "category"),
                     ("C-f", "filter"),
+                    ("s", "sort"),
                     ("Esc", "back"),
                 ]);
                 frame.render_widget(help, help_area);
@@ -487,6 +492,9 @@ impl App {
                 self.view = View::Downloads;
                 self.refresh_torrent_list();
             }
+            KeyCode::Char('p') => {
+                self.play_next_unwatched()?;
+            }
             _ => {}
         }
         Ok(())
@@ -561,6 +569,14 @@ impl App {
                 KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     // Cycle filter
                     self.search_filter = self.search_filter.next();
+                }
+                KeyCode::Char('s') => {
+                    // Cycle sort
+                    self.search_sort = self.search_sort.next();
+                    // If results exist, re-search with new sort to respect server-side ordering
+                    if !self.search_results.is_empty() {
+                        self.perform_search();
+                    }
                 }
                 // Enter filter mode with /
                 KeyCode::Char('/') if !self.search_results.is_empty() => {
@@ -778,6 +794,64 @@ impl App {
         Ok(())
     }
 
+    fn play_next_unwatched(&mut self) -> Result<()> {
+        let Some(show_idx) = self.library_state.selected() else {
+            return Ok(());
+        };
+
+        // Scope to borrow show/episode
+        let (show_id, episode_number, path, start_pos) = {
+            let show = &self.library.shows[show_idx];
+            let Some(episode) = show.next_unwatched() else {
+                return Ok(());
+            };
+
+            let path = episode.full_path(&show.path);
+            let start_pos = if episode.last_position > 0 {
+                Some(episode.last_position)
+            } else {
+                None
+            };
+            (show.id.clone(), episode.number, path, start_pos)
+        };
+
+        // Check if file is compressed and decompress to temp if needed
+        let (play_path, temp_path) = if compression::is_compressed(&path) {
+            info!(path = %path.display(), "Decompressing episode for playback");
+            let temp = compression::decompress_to_temp(&path)?;
+            (temp.clone(), Some(temp))
+        } else {
+            (path, None)
+        };
+
+        let player_cmd = self.config.general.player.clone();
+        
+        // Select logic for args based on player name (fallback to mpv args if exact match not found for vlc)
+        // Check if user has specific config for this player
+        let args = if player_cmd == "vlc" {
+             self.config.player.vlc.as_ref().map(|p| p.args.clone()).unwrap_or_else(|| vec!["--fullscreen".to_string()])
+        } else {
+             // Default to mpv args or empty if unknown
+             self.config.player.mpv.args.clone()
+        };
+
+        let mut player = ExternalPlayer::new(player_cmd, args);
+        player.play(&play_path, start_pos)?;
+        player.wait()?;
+
+        // Clean up temp file if we decompressed
+        if let Some(temp) = temp_path {
+            if let Some(parent) = temp.parent() {
+                let _ = std::fs::remove_dir_all(parent);
+            }
+        }
+
+        self.library.mark_watched(&show_id, episode_number);
+        self.library.save()?;
+
+        Ok(())
+    }
+
     fn download_selected_torrent(&mut self) {
         let Some(idx) = self.search_state.selected() else {
             return;
@@ -898,11 +972,12 @@ impl App {
         let query = self.search_query.clone();
         let category = self.search_category;
         let filter = self.search_filter;
+        let sort = self.search_sort;
         let client = Arc::clone(&self.nyaa_client);
         let tx = self.msg_tx.clone();
 
         tokio::spawn(async move {
-            match client.search(&query, category, filter).await {
+            match client.search(&query, category, filter, sort).await {
                 Ok(results) => {
                     let _ = tx.send(AppMessage::SearchResults(results));
                 }

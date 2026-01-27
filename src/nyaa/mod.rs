@@ -139,10 +139,54 @@ impl Default for NyaaFilter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NyaaSort {
+    Date,
+    Seeders,
+    Size,
+    Downloads,
+}
+
+impl NyaaSort {
+    fn as_query_param(&self) -> &'static str {
+        match self {
+            NyaaSort::Date => "id",
+            NyaaSort::Seeders => "seeders",
+            NyaaSort::Size => "size",
+            NyaaSort::Downloads => "downloads",
+        }
+    }
+
+    pub fn as_display(&self) -> &'static str {
+        match self {
+            NyaaSort::Date => "Date",
+            NyaaSort::Seeders => "Seeders",
+            NyaaSort::Size => "Size",
+            NyaaSort::Downloads => "Downloads",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            NyaaSort::Date => NyaaSort::Seeders,
+            NyaaSort::Seeders => NyaaSort::Size,
+            NyaaSort::Size => NyaaSort::Downloads,
+            NyaaSort::Downloads => NyaaSort::Date,
+        }
+    }
+}
+
+impl Default for NyaaSort {
+    fn default() -> Self {
+        NyaaSort::Seeders
+    }
+}
+
 pub struct NyaaClient {
     client: reqwest::Client,
     pub category: NyaaCategory,
     pub filter: NyaaFilter,
+    pub sort: NyaaSort,
 }
 
 impl NyaaClient {
@@ -154,6 +198,7 @@ impl NyaaClient {
                 .expect("Failed to create HTTP client"),
             category: NyaaCategory::AnimeEnglish, // Default to English subs
             filter: NyaaFilter::NoFilter,
+            sort: NyaaSort::default(),
         }
     }
 
@@ -175,8 +220,13 @@ impl NyaaClient {
         self
     }
 
+    pub fn with_sort(mut self, sort: NyaaSort) -> Self {
+        self.sort = sort;
+        self
+    }
+
     /// Search nyaa.si for torrents matching the query using smart query parsing
-    pub async fn search(&self, query: &str, category: NyaaCategory, filter: NyaaFilter) -> Result<Vec<NyaaResult>> {
+    pub async fn search(&self, query: &str, category: NyaaCategory, filter: NyaaFilter, sort: NyaaSort) -> Result<Vec<NyaaResult>> {
         let search_query = smart_search(query);
         let mut all_results = Vec::new();
         let mut seen_magnets = std::collections::HashSet::new();
@@ -188,7 +238,7 @@ impl NyaaClient {
         for query_str in queries {
             debug!(query = %query_str, "Trying search query");
             
-            match self.search_with_options(query_str, category, filter).await {
+            match self.search_with_options(query_str, category, filter, sort).await {
                 Ok(results) => {
                     let mut count = 0;
                     for result in results {
@@ -221,14 +271,15 @@ impl NyaaClient {
     }
 
     /// Search nyaa.si with specific category and filter options
-    pub async fn search_with_options(&self, query: &str, category: NyaaCategory, filter: NyaaFilter) -> Result<Vec<NyaaResult>> {
+    pub async fn search_with_options(&self, query: &str, category: NyaaCategory, filter: NyaaFilter, sort: NyaaSort) -> Result<Vec<NyaaResult>> {
         let encoded_query = urlencoding::encode(query);
         let url = format!(
-            "{}/?f={}&c={}&q={}",
+            "{}/?f={}&c={}&q={}&s={}&o=desc",
             NYAA_BASE_URL,
             filter.as_query_param(),
             category.as_query_param(),
-            encoded_query
+            encoded_query,
+            sort.as_query_param()
         );
 
         debug!(url = %url, "Searching nyaa.si");
