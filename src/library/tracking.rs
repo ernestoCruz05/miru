@@ -49,7 +49,18 @@ pub async fn check_for_updates(library: &Library, client: &NyaaClient) -> Vec<Up
                     }
 
                     // Check if we already have this episode
-                    if let Some(show) = library.get_show(&series.id) {
+                    // Try ID match first, then fallback to title match
+                    let existing_show = library.get_show(&series.id).or_else(|| {
+                        library.shows.iter().find(|s| {
+                            // Simple case-insensitive containment check
+                            // Check if library show title contains query, or vice-versa
+                            let s_title = s.title.to_lowercase();
+                            let q_title = series.title.to_lowercase(); // series.title is the query
+                            s_title.contains(&q_title) || q_title.contains(&s_title)
+                        })
+                    });
+
+                    if let Some(show) = existing_show {
                         if show.get_episode(ep_num).is_some() {
                             continue; // Already have it
                         }

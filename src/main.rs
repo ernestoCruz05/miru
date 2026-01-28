@@ -8,6 +8,7 @@ mod player;
 mod torrent;
 mod ui;
 mod rpc;
+mod metadata;
 
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};

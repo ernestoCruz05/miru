@@ -11,6 +11,10 @@ pub struct Show {
     pub total_episodes: Option<u32>,
     #[serde(default)]
     pub episodes: Vec<Episode>,
+    #[serde(default)]
+    pub metadata: Option<crate::metadata::AnimeMetadata>,
+    #[serde(default)]
+    pub cover_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +37,10 @@ pub struct TrackedSeries {
     pub filter_quality: Option<String>,
     #[serde(default)]
     pub min_episode: u32,
+    #[serde(default)]
+    pub metadata_id: Option<u64>,
+    #[serde(default)]
+    pub cached_metadata: Option<crate::metadata::AnimeMetadata>,
 }
 
 impl Show {
@@ -43,6 +51,8 @@ impl Show {
             path,
             total_episodes: None,
             episodes: Vec::new(),
+            metadata: None,
+            cover_path: None,
         }
     }
 

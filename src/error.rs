@@ -34,6 +34,9 @@ pub enum Error {
 
     #[error("Torrent client error: {0}")]
     TorrentClient(String),
+
+    #[error("Metadata error: {0}")]
+    Metadata(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -57,7 +57,18 @@ port = 8080
 password = "password"
 managed_daemon_command = "qbittorrent-nox" # Optional: Auto-launch torrent daemon
 # managed_daemon_args = ["--webui-port=8080"]
+
+[metadata]
+mal_client_id = "" # Optional: Required for MyAnimeList integration
 ```
+
+### MyAnimeList Setup
+
+To use metadata features, you need a Client ID:
+
+1.  Log in to [MyAnimeList API Config](https://myanimelist.net/apiconfig).
+2.  Click **"Create ID"** (App Type: "Other", Name: "Miru", fill the rest...).
+3.  Copy the **Client ID** to `config.toml`.
 
 ## Usage
 
@@ -75,6 +86,7 @@ miru
 - `d`: View downloads
 - `r`: Refresh library
 - `x`: Delete show
+- `m`: Fetch metadata (MAL)
 - `q`: Quit
 
 #### Episodes View

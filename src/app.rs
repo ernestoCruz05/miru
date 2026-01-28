@@ -240,6 +240,8 @@ pub enum AppMessage {
     SearchError(String),
     TorrentAdded(String),
     TorrentError(String),
+    MetadataFound(String, crate::metadata::AnimeMetadata), // Show ID, Metadata
+    MetadataError(String),
     TorrentList(Vec<TorrentStatus>),
     UpdatesFound(Vec<UpdateResult>),
 }
@@ -286,6 +288,7 @@ pub struct App {
     // Clients
     pub nyaa_client: Arc<NyaaClient>,
     pub torrent_client: Option<Arc<AnyTorrentClient>>,
+    pub metadata_provider: Option<Arc<dyn crate::metadata::MetadataProvider + Send + Sync>>,
     pub rpc: Option<DiscordRpc>,
     pub managed_daemon_handle: Option<std::process::Child>,
 }
@@ -303,6 +306,13 @@ impl App {
 
         // Initialize torrent client based on config
         let torrent_client = create_torrent_client(&config);
+
+        let metadata_provider: Option<Arc<dyn crate::metadata::MetadataProvider + Send + Sync>> =
+            if !config.metadata.mal_client_id.is_empty() {
+                Some(Arc::new(crate::metadata::mal::MalClient::new(config.metadata.mal_client_id.clone())))
+            } else {
+                None
+            };
 
         Self {
             config,
@@ -340,6 +350,7 @@ impl App {
 
             nyaa_client: Arc::new(NyaaClient::new()),
             torrent_client: torrent_client.map(Arc::new),
+            metadata_provider,
             rpc: Some(DiscordRpc::new("1465518237599928381")),
             managed_daemon_handle: None, 
         }
@@ -385,8 +396,18 @@ impl App {
                     debug!(hash = %hash, "Torrent added");
                     self.refresh_torrent_list();
                 }
-                AppMessage::TorrentError(err) => {
-                    error!(error = %err, "Torrent operation failed");
+                AppMessage::TorrentError(e) => {
+                    error!("Torrent client error: {}", e);
+                }
+                AppMessage::MetadataFound(show_id, metadata) => {
+                    if let Some(show) = self.library.shows.iter_mut().find(|s| s.id == show_id) {
+                        info!("Updated metadata for: {}", show.title);
+                        show.metadata = Some(metadata);
+                        let _ = self.library.save();
+                    }
+                }
+                AppMessage::MetadataError(e) => {
+                    error!("Metadata fetch failed: {}", e);
                 }
                 AppMessage::TorrentList(torrents) => {
                     self.torrents = torrents;
@@ -632,6 +653,37 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.refresh_library()?;
+            }
+            KeyCode::Char('m') => {
+                if let Some(idx) = self.library_state.selected() {
+                    if let Some(show) = self.library.shows.get(idx) {
+                        if let Some(provider) = self.metadata_provider.clone() {
+                            let show_id = show.id.clone();
+                            let query = show.title.clone();
+                            let tx = self.msg_tx.clone();
+                            
+                            info!("Fetching metadata for: {}", query);
+                            
+                            tokio::spawn(async move {
+                                match provider.search(&query).await {
+                                    Ok(results) => {
+                                        if let Some(first) = results.into_iter().next() {
+                                            let _ = tx.send(AppMessage::MetadataFound(show_id, first));
+                                        } else {
+                                            let _ = tx.send(AppMessage::MetadataError(format!("No results for: {}", query)));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(AppMessage::MetadataError(e.to_string()));
+                                    }
+                                }
+                            });
+                        } else {
+                            // Notify user? For now just log
+                            error!("No metadata provider configured (check mal_client_id)");
+                        }
+                    }
+                }
             }
             KeyCode::Char('/') => {
                 self.view = View::Search;
@@ -1265,7 +1317,7 @@ impl App {
         let tx = self.msg_tx.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = client.remove(&hash, false).await {
+            if let Err(e) = client.remove(&hash, true).await {
                 let _ = tx.send(AppMessage::TorrentError(e.to_string()));
             }
         });
@@ -1380,6 +1432,8 @@ impl App {
                             filter_group: if self.tracking_state.input_group.trim().is_empty() { None } else { Some(self.tracking_state.input_group.trim().to_string()) },
                             filter_quality: if self.tracking_state.input_quality.trim().is_empty() { None } else { Some(self.tracking_state.input_quality.trim().to_string()) },
                             min_episode: 0,
+                            metadata_id: None,
+                            cached_metadata: None,
                         };
                         
                         self.library.tracked_shows.push(series);

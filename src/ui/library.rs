@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, ListState},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -62,5 +62,103 @@ pub fn render_library_view(
         )
         .highlight_symbol("▶ ");
 
-    frame.render_stateful_widget(list, area, list_state);
+    let layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let list_area = layout[0];
+    let details_area = layout[1];
+
+    frame.render_stateful_widget(list, list_area, list_state);
+
+    // Render Details
+    render_details(frame, details_area, shows, list_state, accent);
+}
+
+fn render_details(
+    frame: &mut Frame,
+    area: Rect,
+    shows: &[Show],
+    list_state: &ListState,
+    accent: Color,
+) {
+    let block = Block::default()
+        .title(" Details ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(accent));
+    
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    if let Some(idx) = list_state.selected() {
+        if let Some(show) = shows.get(idx) {
+            // Layout: Top for Title/Info, Bottom for Synopsis
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Title
+                    Constraint::Length(1), // Gap
+                    Constraint::Length(4), // Meta info
+                    Constraint::Length(1), // Gap
+                    Constraint::Min(0),    // Synopsis
+                ])
+                .split(inner_area);
+
+            // Title
+            let title = &show.title;
+            frame.render_widget(
+                Paragraph::new(Span::styled(title, Style::default().add_modifier(Modifier::BOLD).fg(accent))),
+                chunks[0]
+            );
+
+            // Metadata info
+            let mut info_text = Vec::new();
+            if let Some(meta) = &show.metadata {
+                info_text.push(Line::from(vec![
+                    Span::styled("Score: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(meta.score.map(|s| format!("{:.2}", s)).unwrap_or_else(|| "N/A".to_string())),
+                ]));
+                info_text.push(Line::from(vec![
+                    Span::styled("Status: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(&meta.status),
+                ]));
+                if let Some(episodes) = meta.episodes {
+                    info_text.push(Line::from(vec![
+                        Span::styled("Episodes: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(episodes.to_string()),
+                    ]));
+                }
+                 info_text.push(Line::from(vec![
+                    Span::styled("Genres: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(meta.genres.join(", ")),
+                ]));
+            } else {
+                info_text.push(Line::from(Span::styled("No metadata available.", Style::default().fg(Color::DarkGray))));
+                info_text.push(Line::from(""));
+                info_text.push(Line::from(Span::styled("Press 'm' to fetch metadata", Style::default().fg(Color::DarkGray))));
+            }
+            
+            frame.render_widget(Paragraph::new(info_text), chunks[2]);
+
+            // Synopsis
+            if let Some(meta) = &show.metadata {
+                if let Some(synopsis) = &meta.synopsis {
+                    frame.render_widget(
+                        Paragraph::new(synopsis.as_str())
+                            .wrap(Wrap { trim: true })
+                            .block(Block::default().borders(Borders::TOP).title(" Synopsis ")),
+                        chunks[4]
+                    );
+                }
+            }
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new("Select a show to view details")
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(Style::default().fg(Color::DarkGray)),
+            inner_area
+        );
+    }
 }

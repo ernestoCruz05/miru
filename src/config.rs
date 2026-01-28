@@ -15,6 +15,18 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub torrent: TorrentConfig,
+    #[serde(default)]
+    pub metadata: MetadataConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataConfig {
+    #[serde(default = "default_mal_client_id")]
+    pub mal_client_id: String,
+}
+
+fn default_mal_client_id() -> String {
+    "".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +110,15 @@ impl Default for Config {
             player: PlayerConfig::default(),
             ui: UiConfig::default(),
             torrent: TorrentConfig::default(),
+            metadata: MetadataConfig::default(),
+        }
+    }
+}
+
+impl Default for MetadataConfig {
+    fn default() -> Self {
+        Self {
+            mal_client_id: default_mal_client_id(),
         }
     }
 }
