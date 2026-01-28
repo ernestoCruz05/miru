@@ -39,7 +39,7 @@ cargo install --path .
 
 ### Dependencies
 
-- **Rust** 1.85+ (2024 edition)
+- **Rust** 1.93
 - **mpv** — for playback
 - **qBittorrent** or **Transmission** — for downloads (optional)
 
