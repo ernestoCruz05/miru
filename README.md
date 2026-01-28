@@ -1,50 +1,59 @@
-# miru (見る)
+# 見る miru
 
-A terminal-based anime library manager written in Rust.
+> A sleek terminal-based anime library manager written in Rust
 
 https://github.com/user-attachments/assets/c5ff0012-32e4-416c-bff6-95da86b750fb
 
-
 ## Features
 
-- **Library Management**: Automatically scans and organizes your local anime collection
-- **Episode Tracking**: Track watched episodes and resume from where you left off
-- **Nyaa.si Search**: Search and download anime torrents directly from the app
-- **Torrent Integration**: Supports qBittorrent and Transmission clients
-- **mpv & VLC Playback**: Play episodes with mpv or VLC, with customizable arguments
-- **Episode Compression**: Compress episodes with zstd to save disk space, with transparent decompression on playback
-- **Cover Image Support**: View anime cover art/box art in the library
-- **Auto-Download Tracking**: Track series and automatically download new episodes (with release group/quality filtering)
-- **Discord RPC**: Display your current activity on Discord
-- **Daemon Management**: Automatically launch your torrent client on startup
+| Feature | Description |
+|---------|-------------|
+| **Library Management** | Automatically scans and organizes your local anime collection |
+| **Smart Playback** | mpv or VLC integration with resume support |
+| **Nyaa.si Search** | Search and download torrents directly from the TUI |
+| **Auto-Download** | Track series and auto-download new episodes with filters |
+| **Cover Art** | Display anime artwork in the terminal |
+| **Compression** | Zstd compression to save disk space |
+| **Discord RPC** | Show your current activity on Discord |
+
+---
 
 ## Installation
 
 ### From Source
 
 ```bash
+# Clone the repository
 git clone https://github.com/ernestoCruz05/miru.git
 cd miru
+
+# Build release binary
 cargo build --release
+
+# Install to PATH (run 'miru' from anywhere)
+cargo install --path .
 ```
 
-The binary will be at `target/release/miru`.
+> [!TIP]
+> After `cargo install`, you can simply type `miru` in any terminal to launch!
 
 ### Dependencies
 
-- Rust 1.85+ (2024 edition)
-- mpv (for playback)
-- qBittorrent or Transmission (optional, for downloads)
+- **Rust** 1.85+ (2024 edition)
+- **mpv** — for playback
+- **qBittorrent** or **Transmission** — for downloads (optional)
+
+---
 
 ## Configuration
 
-Configuration is stored at `~/.config/miru/config.toml`:
+Config file: `~/.config/miru/config.toml`
 
 ```toml
 [general]
 media_dirs = ["~/Anime", "/mnt/media/Anime"]
-compress_episodes = false  # Enable zstd compression for episodes
-compression_level = 3      # 1-19, higher = smaller files but slower
+compress_episodes = false   # Enable zstd compression
+compression_level = 3       # 1-19 (higher = smaller, slower)
 
 [player.mpv]
 args = ["--fullscreen"]
@@ -53,24 +62,23 @@ args = ["--fullscreen"]
 accent_color = "#e06c75"
 
 [torrent]
-client = "qbittorrent"  # or "transmission"
+client = "qbittorrent"      # or "transmission"
 host = "localhost"
 port = 8080
-password = "password"
-managed_daemon_command = "qbittorrent-nox" # Optional: Auto-launch torrent daemon
-# managed_daemon_args = ["--webui-port=8080"]
+password = "your-password"
+managed_daemon_command = "qbittorrent-nox"  # Auto-launch daemon
 
 [metadata]
-mal_client_id = "" # Optional: Required for MyAnimeList integration
+mal_client_id = ""          # For MyAnimeList integration
 ```
 
 ### MyAnimeList Setup
 
-To use metadata features, you need a Client ID:
+1. Log in to [MyAnimeList API Config](https://myanimelist.net/apiconfig)
+2. Click **Create ID** (App Type: "Other", Name: "Miru")
+3. Copy the **Client ID** to `config.toml`
 
-1.  Log in to [MyAnimeList API Config](https://myanimelist.net/apiconfig).
-2.  Click **"Create ID"** (App Type: "Other", Name: "Miru", fill the rest...).
-3.  Copy the **Client ID** to `config.toml`.
+---
 
 ## Usage
 
@@ -80,41 +88,69 @@ miru
 
 ### Keybindings
 
-#### Library View
-- `j/k` or arrows: Navigate shows
-- `Enter` or `l`: View episodes
-- `/`: Search nyaa.si
-- `t`: Track new series (opens Tracking Dialog)
-- `d`: View downloads
-- `r`: Refresh library
-- `x`: Delete show
-- `m`: Fetch metadata (MAL)
-- `q`: Quit
+<details>
+<summary><b>Library View</b></summary>
 
-#### Episodes View
-- `j/k` or arrows: Navigate episodes
-- `Enter`: Play episode
-- `Space`: Toggle watched status
-- `x`: Delete episode
-- `Esc` or `h`: Back to library
+| Key | Action |
+|-----|--------|
+| `j/k` or arrows | Navigate shows |
+| `Enter` / `l` | View episodes |
+| `/` | Search Nyaa.si |
+| `t` | Track new series |
+| `T` | View tracked series |
+| `d` | View downloads |
+| `r` | Refresh library |
+| `m` | Fetch MAL metadata |
+| `x` | Delete show |
+| `?` | Help |
+| `q` | Quit |
 
-#### Search View
-- Type to enter search query
-- `Enter`: Search / Download selected
-- `Tab/Down`: Navigate results
-- `Ctrl+c`: Cycle category (All/English/Raw/Non-English)
-- `Ctrl+f`: Cycle filter (None/Trusted/No Remakes)
-- `s`: Cycle sort (Seeders/Date/Size/Downloads)
-- `/`: Filter current results
-- `Esc`: Back to library
+</details>
 
-#### Downloads View
-- `j/k` or arrows: Navigate torrents
-- `Enter`: Play completed download
-- `p`: Pause/Resume torrent
-- `x`: Remove torrent
-- `r`: Refresh list
-- `Esc`: Back to library
+<details>
+<summary><b>Episodes View</b></summary>
+
+| Key | Action |
+|-----|--------|
+| `j/k` or arrows | Navigate episodes |
+| `Enter` | Play episode |
+| `Space` | Toggle watched |
+| `x` | Delete episode |
+| `Esc` / `h` | Back to library |
+
+</details>
+
+<details>
+<summary><b>Search View</b></summary>
+
+| Key | Action |
+|-----|--------|
+| *type* | Enter search query |
+| `Enter` | Search / Download |
+| `Tab` / Down | Navigate results |
+| `Ctrl+C` | Cycle category |
+| `Ctrl+F` | Cycle filter |
+| `Ctrl+S` | Cycle sort |
+| `/` | Filter results |
+| `Esc` | Back |
+
+</details>
+
+<details>
+<summary><b>Downloads View</b></summary>
+
+| Key | Action |
+|-----|--------|
+| `j/k` or arrows | Navigate torrents |
+| `Enter` | Move completed to library |
+| `p` | Pause/Resume |
+| `x` | Remove torrent |
+| `r` | Refresh |
+| `Esc` | Back |
+
+</details>
+
+---
 
 ## License
 
