@@ -119,7 +119,7 @@ impl TorrentClient for TransmissionClient {
             "fields": [
                 "hashString", "name", "percentDone", "rateDownload", "rateUpload",
                 "totalSize", "downloadedEver", "status", "peersSendingToUs",
-                "downloadDir"
+                "downloadDir", "files"
             ]
         });
 
@@ -133,7 +133,37 @@ impl TorrentClient for TransmissionClient {
                     .filter_map(|t| {
                         let name = t.get("name")?.as_str()?.to_string();
                         let download_dir = t.get("downloadDir")?.as_str()?.to_string();
-                        let content_path = format!("{}/{}", download_dir, name);
+                        
+                        // Determine content_path from files
+                        let content_path = if let Some(files) = t.get("files").and_then(|f| f.as_array()) {
+                            if !files.is_empty() {
+                                if let Some(first_file) = files[0].get("name").and_then(|n| n.as_str()) {
+                                    // Check if multi-file (folder) or single file
+                                    let first_component = first_file.split('/').next().unwrap_or(first_file);
+                                    // If multiple files, usually they share a folder. If they don't, it's flat in download_dir.
+                                    // Assuming if multi-file, first component is the folder name IF it matches others?
+                                    // For simplicity: if it has directory separators, use the top level dir.
+                                    // If strictly single file torrent, `files` len is 1.
+                                    if files.len() > 1 && first_file.contains('/') {
+                                        format!("{}/{}", download_dir, first_component)
+                                    } else if files.len() == 1 {
+                                        format!("{}/{}", download_dir, first_file)
+                                    } else {
+                                        // Multiple files but no common root? Unlikely for torrents but possible. 
+                                        // Default to download_dir? Or download_dir/name?
+                                        // Let's fallback to name usage if structure is unclear, but usually name == root folder.
+                                        format!("{}/{}", download_dir, name)
+                                    }
+                                } else {
+                                     format!("{}/{}", download_dir, name)
+                                }
+                            } else {
+                                format!("{}/{}", download_dir, name)
+                            }
+                        } else {
+                            format!("{}/{}", download_dir, name)
+                        };
+
                         Some(TorrentStatus {
                             hash: t.get("hashString")?.as_str()?.to_string(),
                             name,

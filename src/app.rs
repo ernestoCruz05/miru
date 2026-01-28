@@ -73,20 +73,32 @@ fn clean_filename(name: &str) -> String {
                 // Get the show name (everything before the match)
                 let show_name = clean[..caps.get(0).unwrap().start()].trim();
                 let show_name = show_name.trim_end_matches(&['-', '.', ' '][..]);
-                let ext = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("mkv");
+                // Sanitize: replace chars invalid in filenames (/ and \)
+                let show_name = show_name.replace('/', "-").replace('\\', "-");
+                // Extract extension - validate it's a known video extension
+                let ext = Path::new(name).extension()
+                    .and_then(|e| e.to_str())
+                    .filter(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+                    .unwrap_or("mkv");
                 return format!("{} - S{:02}E{:02}.{}", show_name, season, episode, ext);
             } else {
                 let episode: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(1);
                 let show_name = clean[..caps.get(0).unwrap().start()].trim();
                 let show_name = show_name.trim_end_matches(&['-', '.', ' '][..]);
-                let ext = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("mkv");
+                // Sanitize: replace chars invalid in filenames (/ and \)
+                let show_name = show_name.replace('/', "-").replace('\\', "-");
+                // Extract extension - validate it's a known video extension
+                let ext = Path::new(name).extension()
+                    .and_then(|e| e.to_str())
+                    .filter(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+                    .unwrap_or("mkv");
                 return format!("{} - E{:02}.{}", show_name, episode, ext);
             }
         }
     }
     
-    // If no pattern matched, just return cleaned name
-    clean.trim().to_string()
+    // If no pattern matched, just return cleaned name (also sanitized)
+    clean.replace('/', "-").replace('\\', "-").trim().to_string()
 }
 
 /// List subdirectories in a path (for show folders)
@@ -294,6 +306,7 @@ pub struct App {
     pub picker: ratatui_image::picker::Picker,
     pub rpc: Option<DiscordRpc>,
     pub managed_daemon_handle: Option<std::process::Child>,
+    pub startup_scan_completed: bool,
 }
 
 impl App {
@@ -368,6 +381,7 @@ impl App {
             picker,
             rpc: Some(DiscordRpc::new("1465518237599928381")),
             managed_daemon_handle: None, 
+            startup_scan_completed: false,
         }
     }
 
@@ -375,8 +389,7 @@ impl App {
         // Start periodic torrent list refresh
         self.refresh_torrent_list();
         
-        // Check for tracking updates
-        self.check_for_updates();
+        // Check for updates happens after torrent list is loaded
 
         // Launch managed daemon if configured
         self.spawn_managed_daemon();
@@ -448,9 +461,25 @@ impl App {
                     if !self.torrents.is_empty() && self.downloads_state.selected().is_none() {
                         self.downloads_state.select(Some(0));
                     }
+                    
+                    // Trigger tracking update scan only once we have the torrent list
+                    // This prevents re-adding existing torrents
+                    if !self.startup_scan_completed {
+                        self.startup_scan_completed = true;
+                        self.check_for_updates();
+                    }
                 }
                 AppMessage::UpdatesFound(updates) => {
                     for update in updates {
+                        // Skip if already in active torrents (prevents race condition with move dialog)
+                        let already_active = self.torrents.iter().any(|t| {
+                            t.name.to_lowercase() == update.title.to_lowercase()
+                        });
+                        if already_active {
+                            debug!("Skipping auto-download (already active): {}", update.title);
+                            continue;
+                        }
+                        
                         if let Some(client) = &self.torrent_client {
                            info!("Auto-downloading: {} - {}", update.series_title, update.title);
                            // Async adding of magnets?
@@ -828,7 +857,15 @@ impl App {
                     // Cycle filter
                     self.search_filter = self.search_filter.next();
                 }
-                KeyCode::Char('s') => {
+                KeyCode::Tab | KeyCode::Down => {
+                    if !self.search_results.is_empty() {
+                        self.move_selection_down(&View::Search);
+                    }
+                }
+                KeyCode::Up  => {
+                    self.move_selection_up(&View::Search);
+                }
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     // Cycle sort
                     self.search_sort = self.search_sort.next();
                     // If results exist, re-search with new sort to respect server-side ordering
@@ -854,19 +891,13 @@ impl App {
                         self.download_selected_torrent();
                     }
                 }
-                KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => {
-                    if !self.search_results.is_empty() {
-                        self.move_selection_down(&View::Search);
-                    }
-                }
-                KeyCode::Up | KeyCode::Char('k')  => {
-                    self.move_selection_up(&View::Search);
-                }
                 KeyCode::Char('?') => {
                     self.toggle_help();
                 }
                 KeyCode::Char(c) => {
-                    self.search_query.push(c);
+                    if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                        self.search_query.push(c);
+                    }
                 }
                 _ => {}
             }
@@ -1395,35 +1426,22 @@ impl App {
             creating_new: false,
             filename: clean_name.clone(), // Use cleaned name as default destination filename
             original_path: {
-                let path = Path::new(&self.torrents[idx].save_path).join(original_filename);
+                let path = PathBuf::from(&self.torrents[idx].content_path);
                 info!(
-                    "Opening move dialog. Torrent: '{}', Save Path: '{}', Constructed Path: '{}', Exists: {}", 
+                    "Opening move dialog. Torrent: '{}', Content Path: '{}', Exists: {}", 
                     original_filename, 
-                    self.torrents[idx].save_path, 
                     path.display(), 
                     path.exists()
                 );
+                
                 if !path.exists() {
-                    // Try to find file with video extension
-                    let mut found_path = None;
-                    for ext in VIDEO_EXTENSIONS {
-                         let path_with_ext = Path::new(&self.torrents[idx].save_path).join(format!("{}.{}", original_filename, ext));
-                         if path_with_ext.exists() {
-                             info!("Found match with extension: {}", path_with_ext.display());
-                             found_path = Some(path_with_ext);
-                             break;
-                         }
-                    }
-
-                    if let Some(p) = found_path {
-                        p
-                    } else {
-                        error!("Constructed path does NOT exist and no extension match found.");
-                        path
-                    }
-                } else {
-                    path
+                     error!("Content path reported by torrent client does NOT exist: {}", path.display());
+                     // Fallback to old construction logic JUST IN CASE client reports weird paths?
+                     // Actually, if client says path is X, it should be X. 
+                     // But maybe we can keep the save_path join as a backup if content_path is empty/invalid?
+                     // For now, let's trust content_path but log heavily if missing.
                 }
+                path
             },
 
         };
@@ -1509,8 +1527,13 @@ impl App {
         let client = self.nyaa_client.clone();
         let tx = self.msg_tx.clone();
         
+        let existing_torrents: Vec<tracking::ExistingTorrent> = self.torrents.iter().map(|t| tracking::ExistingTorrent {
+            hash: t.hash.clone(),
+            name: t.name.clone(),
+        }).collect();
+
         tokio::spawn(async move {
-            let updates = tracking::check_for_updates(&library, &client).await;
+            let updates = tracking::check_for_updates(&library, &client, &existing_torrents).await;
             if !updates.is_empty() {
                 let _ = tx.send(AppMessage::UpdatesFound(updates));
             }
@@ -1626,7 +1649,10 @@ impl App {
                         self.move_dialog.step = MoveDialogStep::SelectShow;
                     }
                     KeyCode::Enter => {
-                        self.execute_move()?;
+                        if let Err(e) = self.execute_move() {
+                            error!("Failed to move file: {}. Source may have been deleted or is in use.", e);
+                            // Stay in dialog so user can cancel with Esc
+                        }
                     }
                     KeyCode::Backspace => {
                         self.move_dialog.filename.pop();
@@ -1787,8 +1813,24 @@ impl App {
         };
 
         if !real_source_path.exists() {
-             error!("Source file does not exist: {}", real_source_path.display());
-             // This will likely cause the rename/copy error next
+             error!("CRITICAL: Source file DOES NOT EXIST at moment of move: {}", real_source_path.display());
+             // List parent directory to see what IS there
+             if let Some(parent) = real_source_path.parent() {
+                 if let Ok(entries) = std::fs::read_dir(parent) {
+                     let file_list: Vec<String> = entries
+                        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+                        .collect();
+                     error!("Parent dir content for {}: {:?}", parent.display(), file_list);
+                 } else {
+                     error!("Could not read parent dir: {}", parent.display());
+                 }
+             }
+        } else {
+            info!("Source file CONFIRMED exists: {}", real_source_path.display());
+            // Check permissions/metadata just in case
+            if let Ok(meta) = std::fs::metadata(&real_source_path) {
+                info!("Source metadata: is_file={}, len={}, permissions={:?}", meta.is_file(), meta.len(), meta.permissions());
+            }
         }
 
         debug!(

@@ -11,7 +11,13 @@ pub struct UpdateResult {
     pub title: String,
 }
 
-pub async fn check_for_updates(library: &Library, client: &NyaaClient) -> Vec<UpdateResult> {
+// Basic info about existing torrents to avoid re-adding
+pub struct ExistingTorrent {
+    pub hash: String,
+    pub name: String,
+}
+
+pub async fn check_for_updates(library: &Library, client: &NyaaClient, existing_torrents: &[ExistingTorrent]) -> Vec<UpdateResult> {
     let mut updates = Vec::new();
 
     // Iterate over tracked shows
@@ -62,7 +68,31 @@ pub async fn check_for_updates(library: &Library, client: &NyaaClient) -> Vec<Up
 
                     if let Some(show) = existing_show {
                         if show.get_episode(ep_num).is_some() {
-                            continue; // Already have it
+                            continue; // Already have in library
+                        }
+                        
+                        // Also check if we are currently downloading it (fuzzy match on title/name)
+                        // We check if any existing torrent looks like this episode
+                        // This is a heuristic.
+                        let is_downloading = existing_torrents.iter().any(|t| {
+                            let t_name = t.name.to_lowercase();
+                            // Check if torrent name contains series title AND episode number
+                            // Or matches the result title roughly
+                            if t_name == title.to_lowercase() {
+                                return true;
+                            }
+                            // Heuristic: torrent name contains "Show Name" and "02" or "E02"
+                            // This is tricky. 
+                            // Easier: check against resolved "UpdateResult" later? 
+                            // No, we want to filter early.
+                            // Let's rely on exact title match (often works if Nyaa title is used as name)
+                            // OR if client uses magnet name.
+                            false
+                        });
+                        
+                        if is_downloading {
+                            debug!("Skipping {} - Episode {} (already downloading)", series.title, ep_num);
+                            continue;
                         }
                     }
 
