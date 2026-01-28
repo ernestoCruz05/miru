@@ -1,8 +1,9 @@
-# miru
+# miru (見る)
 
 A terminal-based anime library manager written in Rust.
 
-*miru* (見る) means "to watch" in Japanese.
+https://github.com/user-attachments/assets/c5ff0012-32e4-416c-bff6-95da86b750fb
+
 
 ## Features
 
