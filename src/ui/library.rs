@@ -5,6 +5,9 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
+use ratatui_image::picker::Picker;
+use ratatui_image::{Resize, Image};
+use crate::image_cache::ImageCache;
 
 use crate::library::Show;
 
@@ -16,6 +19,8 @@ pub fn render_library_view(
     shows: &[Show],
     list_state: &mut ListState,
     accent: Color,
+    image_cache: &ImageCache,
+    picker: &mut Picker,
 ) {
     let items: Vec<ListItem> = shows
         .iter()
@@ -73,7 +78,7 @@ pub fn render_library_view(
     frame.render_stateful_widget(list, list_area, list_state);
 
     // Render Details
-    render_details(frame, details_area, shows, list_state, accent);
+    render_details(frame, details_area, shows, list_state, accent, image_cache, picker);
 }
 
 fn render_details(
@@ -82,6 +87,8 @@ fn render_details(
     shows: &[Show],
     list_state: &ListState,
     accent: Color,
+    image_cache: &ImageCache,
+    picker: &mut Picker,
 ) {
     let block = Block::default()
         .title(" Details ")
@@ -93,7 +100,20 @@ fn render_details(
 
     if let Some(idx) = list_state.selected() {
         if let Some(show) = shows.get(idx) {
-            // Layout: Top for Title/Info, Bottom for Synopsis
+            
+            // Split into Text (Left) and Image (Right)
+            // But if image is not avaialble, maybe take full width?
+            // Actually consistency is good.
+            
+            let content_layout = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(0), Constraint::Length(30)])
+                .split(inner_area);
+                
+            let text_area = content_layout[0];
+            let image_area = content_layout[1];
+
+            // Layout for Text: Top for Title/Info, Bottom for Synopsis
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -103,7 +123,7 @@ fn render_details(
                     Constraint::Length(1), // Gap
                     Constraint::Min(0),    // Synopsis
                 ])
-                .split(inner_area);
+                .split(text_area);
 
             // Title
             let title = &show.title;
@@ -133,6 +153,25 @@ fn render_details(
                     Span::styled("Genres: ", Style::default().fg(Color::DarkGray)),
                     Span::raw(meta.genres.join(", ")),
                 ]));
+                
+                // Render Image
+                if let Some(url) = &meta.cover_url {
+                     if let Some(img) = image_cache.get(url) {
+                        if let Ok(protocol) = picker.new_protocol(img, image_area, Resize::Fit(None)) {
+                             let widget = Image::new(&protocol);
+                             frame.render_widget(widget, image_area);
+                        }
+                     }
+                }
+                     // Else we could trigger download here if not present, but App handles logic.
+                     // App doesn't know *which* show is visible unless we tell it.
+                     // But we only fetch metadata for *selected*.
+                     // App logic: When MetadataFound, download cover.
+                     // On load (start), if metadata exists, we might need to check if cover is cached?
+                     // If it's cached, we are good.
+                     // If not, we might want to trigger download.
+                // For now, assume cached or downloaded on fetch.
+
             } else {
                 info_text.push(Line::from(Span::styled("No metadata available.", Style::default().fg(Color::DarkGray))));
                 info_text.push(Line::from(""));

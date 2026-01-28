@@ -241,6 +241,7 @@ pub enum AppMessage {
     TorrentAdded(String),
     TorrentError(String),
     MetadataFound(String, crate::metadata::AnimeMetadata), // Show ID, Metadata
+    CoverUpdated(String), // Show ID (cover downloaded)
     MetadataError(String),
     TorrentList(Vec<TorrentStatus>),
     UpdatesFound(Vec<UpdateResult>),
@@ -289,12 +290,14 @@ pub struct App {
     pub nyaa_client: Arc<NyaaClient>,
     pub torrent_client: Option<Arc<AnyTorrentClient>>,
     pub metadata_provider: Option<Arc<dyn crate::metadata::MetadataProvider + Send + Sync>>,
+    pub image_cache: Arc<crate::image_cache::ImageCache>,
+    pub picker: ratatui_image::picker::Picker,
     pub rpc: Option<DiscordRpc>,
     pub managed_daemon_handle: Option<std::process::Child>,
 }
 
 impl App {
-    pub fn new(config: Config, library: Library) -> Self {
+    pub fn new(config: Config, library: Library, picker: ratatui_image::picker::Picker) -> Self {
         let accent = widgets::parse_accent_color(&config.ui.accent_color);
 
         let mut library_state = ListState::default();
@@ -313,6 +316,16 @@ impl App {
             } else {
                 None
             };
+        
+        let image_cache = Arc::new(crate::image_cache::ImageCache::new().unwrap_or_else(|e| {
+            tracing::error!("Failed to initialize image cache: {}", e);
+            // Fallback (maybe should be fatal? No, just no cache)
+             // We need to construct a valid object tho?
+             // Since ImageCache::new returns Result, let's panic if we can't create cache dir?
+             // Or better, handle it gracefully?
+             // For now, let's panic or unwrap as config dir should exist.
+             panic!("Failed to initialize image cache: {}", e);
+        }));
 
         Self {
             config,
@@ -351,6 +364,8 @@ impl App {
             nyaa_client: Arc::new(NyaaClient::new()),
             torrent_client: torrent_client.map(Arc::new),
             metadata_provider,
+            image_cache,
+            picker,
             rpc: Some(DiscordRpc::new("1465518237599928381")),
             managed_daemon_handle: None, 
         }
@@ -402,9 +417,28 @@ impl App {
                 AppMessage::MetadataFound(show_id, metadata) => {
                     if let Some(show) = self.library.shows.iter_mut().find(|s| s.id == show_id) {
                         info!("Updated metadata for: {}", show.title);
+                        
+                        // Trigger cover download if URL exists
+                        if let Some(url) = metadata.cover_url.clone() {
+                            let cache = self.image_cache.clone();
+                            let tx = self.msg_tx.clone();
+                            let s_id = show_id.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = cache.download(&url).await {
+                                    tracing::error!("Failed to download cover for {}: {}", s_id, e);
+                                } else {
+                                    let _ = tx.send(AppMessage::CoverUpdated(s_id));
+                                }
+                            });
+                        }
+
                         show.metadata = Some(metadata);
                         let _ = self.library.save();
                     }
+                }
+                AppMessage::CoverUpdated(show_id) => {
+                     info!("Cover image updated for show: {}", show_id);
+                     // Implicitly redraw on next tick
                 }
                 AppMessage::MetadataError(e) => {
                     error!("Metadata fetch failed: {}", e);
@@ -459,6 +493,8 @@ impl App {
                     &self.library.shows,
                     &mut self.library_state,
                     self.accent,
+                    &self.image_cache,
+                    &mut self.picker,
                 );
 
                 let help = widgets::help_bar(&[
@@ -550,6 +586,8 @@ impl App {
                     &self.library.shows,
                     &mut self.library_state,
                     self.accent,
+                    &self.image_cache,
+                    &mut self.picker,
                 );
                 // Render dialog overlay
                 self.render_tracking_dialog(frame);
@@ -563,7 +601,7 @@ impl App {
             View::DeleteDialog => {
                 match self.delete_dialog_state.target {
                      DeleteTarget::Show(_) => {
-                        render_library_view(frame, main_area, &self.library.shows, &mut self.library_state, self.accent);
+                        render_library_view(frame, main_area, &self.library.shows, &mut self.library_state, self.accent, &self.image_cache, &mut self.picker);
                      }
                      DeleteTarget::Episode(idx, _) => {
                          if let Some(show) = self.library.shows.get(idx) {
@@ -590,7 +628,7 @@ impl App {
             View::Help => {
                 // Render previous view as background
                 match self.previous_view {
-                    View::Library => render_library_view(frame, main_area, &self.library.shows, &mut self.library_state, self.accent),
+                    View::Library => render_library_view(frame, main_area, &self.library.shows, &mut self.library_state, self.accent, &self.image_cache, &mut self.picker),
                     View::Episodes => {
                         if let Some(idx) = self.selected_show_idx {
                             if let Some(show) = self.library.shows.get(idx) {
@@ -758,9 +796,6 @@ impl App {
                     self.update_filtered_results();
                 }
                 KeyCode::Enter => {
-                    // Confirm filter (keep it active but exit edit mode? Or just stay?)
-                    // For fzf style, Enter usually selects the top item. 
-                    // Let's say Enter selects the currently highlighted item as usual.
                     if !self.filtered_search_results.is_empty() {
                          self.download_selected_torrent();
                     }
@@ -1470,7 +1505,7 @@ impl App {
 
     fn check_for_updates(&self) { 
         // Helper to spawn update task
-        let library = self.library.clone(); // Clone library (might be heavy but necessary for thread safety)
+        let library = self.library.clone(); // necessary for thread safety sadly, dont want to run into race conditions
         let client = self.nyaa_client.clone();
         let tx = self.msg_tx.clone();
         

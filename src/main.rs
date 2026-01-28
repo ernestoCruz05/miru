@@ -9,6 +9,7 @@ mod torrent;
 mod ui;
 mod rpc;
 mod metadata;
+mod image_cache;
 
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -55,6 +56,10 @@ async fn main() -> Result<()> {
     library.save()?;
     info!(shows = library.shows.len(), "Library refreshed");
 
+    // Initialize image picker (before terminal to allow protocol detection)
+    let mut picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+
     // Initialize terminal
     let mut terminal = app::init_terminal()?;
 
@@ -63,7 +68,7 @@ async fn main() -> Result<()> {
     let _ = app::play_splash(&mut terminal, accent);
 
     // Run the app (async)
-    let mut app = App::new(config, library);
+    let mut app = App::new(config, library, picker);
     let result = app.run(&mut terminal).await;
 
     // Restore terminal on exit
