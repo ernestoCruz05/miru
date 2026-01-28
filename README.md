@@ -12,6 +12,7 @@ A terminal-based anime library manager written in Rust.
 - **Torrent Integration**: Supports qBittorrent and Transmission clients
 - **mpv & VLC Playback**: Play episodes with mpv or VLC, with customizable arguments
 - **Episode Compression**: Compress episodes with zstd to save disk space, with transparent decompression on playback
+- **Cover Image Support**: View anime cover art/box art in the library
 - **Auto-Download Tracking**: Track series and automatically download new episodes (with release group/quality filtering)
 - **Discord RPC**: Display your current activity on Discord
 - **Daemon Management**: Automatically launch your torrent client on startup
@@ -82,7 +83,7 @@ miru
 - `j/k` or arrows: Navigate shows
 - `Enter` or `l`: View episodes
 - `/`: Search nyaa.si
-- `t`: Track new series (Auto-Download)
+- `t`: Track new series (opens Tracking Dialog)
 - `d`: View downloads
 - `r`: Refresh library
 - `x`: Delete show
@@ -102,6 +103,8 @@ miru
 - `Tab/Down`: Navigate results
 - `Ctrl+c`: Cycle category (All/English/Raw/Non-English)
 - `Ctrl+f`: Cycle filter (None/Trusted/No Remakes)
+- `s`: Cycle sort (Seeders/Date/Size/Downloads)
+- `/`: Filter current results
 - `Esc`: Back to library
 
 #### Downloads View
