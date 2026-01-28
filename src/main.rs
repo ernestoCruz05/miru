@@ -7,6 +7,7 @@ mod nyaa;
 mod player;
 mod torrent;
 mod ui;
+mod rpc;
 
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};

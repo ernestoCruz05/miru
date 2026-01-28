@@ -61,6 +61,10 @@ pub struct TorrentConfig {
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    #[serde(default)]
+    pub managed_daemon_command: Option<String>,
+    #[serde(default)]
+    pub managed_daemon_args: Option<Vec<String>>,
 }
 
 fn default_torrent_client() -> String {
@@ -153,6 +157,8 @@ impl Default for TorrentConfig {
             port: default_torrent_port(),
             username: None,
             password: None,
+            managed_daemon_command: None,
+            managed_daemon_args: None,
         }
     }
 }

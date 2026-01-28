@@ -24,6 +24,17 @@ pub struct Episode {
     pub last_position: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrackedSeries {
+    pub id: String,
+    pub title: String,
+    pub query: String,
+    pub filter_group: Option<String>,
+    pub filter_quality: Option<String>,
+    #[serde(default)]
+    pub min_episode: u32,
+}
+
 impl Show {
     pub fn new(id: impl Into<String>, title: impl Into<String>, path: PathBuf) -> Self {
         Self {

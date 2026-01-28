@@ -7,16 +7,18 @@ static EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
         // [SubGroup] Show Name - 01 [1080p].mkv or Show Name - 01v2.mkv
         // Matches: " - " followed by episode number, optional version suffix
-        Regex::new(r"- (\d{2,4})(?:v\d)?(?:\s*[\[\(]|\.|\s|$)").unwrap(),
+        Regex::new(r"- (\d{1,4})(?:v\d)?(?:\s*[\[\(]|\.|\s|$)").unwrap(),
         // S01E01 format (common for western naming)
         Regex::new(r"[Ss]\d{1,2}[Ee](\d{1,3})").unwrap(),
         // Show.Name.01.mkv or Show_Name_01.mkv
         // Matches: separator followed by bare number before extension
-        Regex::new(r"[._\s](\d{2,3})[._\s]*(?:\[|$|\.)").unwrap(),
+        Regex::new(r"[._\s](\d{1,3})[._\s]*(?:\[|$|\.)").unwrap(),
         // Bare number at start: 01.mkv, 01 - title.mkv
-        Regex::new(r"^(\d{2,3})(?:\s*[-._]|\.mkv|\.mp4|\.avi)").unwrap(),
+        Regex::new(r"^(\d{1,3})(?:\s*[-._]|\.mkv|\.mp4|\.avi)").unwrap(),
         // Episode 01 or Ep 01 or EP01
         Regex::new(r"[Ee][Pp](?:isode)?[\s._]*(\d{1,3})").unwrap(),
+        // E01 format (common short form)
+        Regex::new(r"(?:[-._\s]|^)[Ee](\d{1,4})(?:v\d)?(?:[._\s]|$)").unwrap(),
     ]
 });
 
@@ -82,6 +84,19 @@ pub fn make_show_title(name: &str) -> String {
         .join(" ")
 }
 
+/// Extract release group from filename (e.g. "[SubsPlease] Show..." -> "SubsPlease")
+pub fn parse_release_group(filename: &str) -> Option<String> {
+    // Usually at the start in brackets
+    Regex::new(r"^\[([^\]]+)\]").unwrap().captures(filename).map(|c| c.get(1).unwrap().as_str().to_string())
+}
+
+/// Extract quality from filename (e.g. "... [1080p].mkv" -> "1080p")
+pub fn parse_quality(filename: &str) -> Option<String> {
+    // Look for 720p, 1080p, 2160p, 4k
+    let re = Regex::new(r"((?:360|480|720|1080|2160)[pP]|4[kK])").unwrap();
+    re.captures(filename).map(|c| c.get(1).unwrap().as_str().to_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +135,8 @@ mod tests {
     fn test_episode_prefix() {
         assert_eq!(parse_episode_number("Show Episode 05.mkv"), Some(5));
         assert_eq!(parse_episode_number("Show Ep01.mkv"), Some(1));
+        assert_eq!(parse_episode_number("Fate Strange Fake - E01.mkv"), Some(1)); // New case
+        assert_eq!(parse_episode_number("Show - E02.mkv"), Some(2));
     }
 
     #[test]

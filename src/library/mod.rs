@@ -1,6 +1,7 @@
 pub mod models;
 pub mod parser;
 pub mod scanner;
+pub mod tracking;
 
 use std::collections::HashMap;
 
@@ -14,10 +15,12 @@ use crate::config::library_path;
 use crate::error::Result;
 
 /// Persisted library state
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Library {
     #[serde(default)]
     pub shows: Vec<Show>,
+    #[serde(default)]
+    pub tracked_shows: Vec<models::TrackedSeries>,
 }
 
 impl Library {

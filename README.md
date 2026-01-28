@@ -10,8 +10,11 @@ A terminal-based anime library manager written in Rust.
 - **Episode Tracking**: Track watched episodes and resume from where you left off
 - **Nyaa.si Search**: Search and download anime torrents directly from the app
 - **Torrent Integration**: Supports qBittorrent and Transmission clients
-- **mpv Playback**: Play episodes with mpv, with customizable arguments
+- **mpv & VLC Playback**: Play episodes with mpv or VLC, with customizable arguments
 - **Episode Compression**: Compress episodes with zstd to save disk space, with transparent decompression on playback
+- **Auto-Download Tracking**: Track series and automatically download new episodes (with release group/quality filtering)
+- **Discord RPC**: Display your current activity on Discord
+- **Daemon Management**: Automatically launch your torrent client on startup
 
 ## Installation
 
@@ -51,8 +54,9 @@ accent_color = "#e06c75"
 client = "qbittorrent"  # or "transmission"
 host = "localhost"
 port = 8080
-username = "admin"
 password = "password"
+managed_daemon_command = "qbittorrent-nox" # Optional: Auto-launch torrent daemon
+# managed_daemon_args = ["--webui-port=8080"]
 ```
 
 ## Usage
@@ -67,14 +71,17 @@ miru
 - `j/k` or arrows: Navigate shows
 - `Enter` or `l`: View episodes
 - `/`: Search nyaa.si
+- `t`: Track new series (Auto-Download)
 - `d`: View downloads
 - `r`: Refresh library
+- `x`: Delete show
 - `q`: Quit
 
 #### Episodes View
 - `j/k` or arrows: Navigate episodes
 - `Enter`: Play episode
 - `Space`: Toggle watched status
+- `x`: Delete episode
 - `Esc` or `h`: Back to library
 
 #### Search View

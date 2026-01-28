@@ -17,9 +17,11 @@ use tracing::{debug, error, info};
 use crate::compression;
 use crate::config::Config;
 use crate::error::Result;
-use crate::library::Library;
+use crate::library::{Library, tracking::{self, UpdateResult}};
 use crate::nyaa::{NyaaCategory, NyaaClient, NyaaFilter, NyaaResult, NyaaSort};
 use crate::player::ExternalPlayer;
+use crate::rpc::DiscordRpc;
+use crate::library::models::TrackedSeries; // Add import
 use crate::torrent::{AnyTorrentClient, QBittorrentClient, TransmissionClient, TorrentStatus};
 use crate::ui::{
     render_downloads_view, render_episodes_view, render_library_view, render_search_view, widgets,
@@ -129,13 +131,65 @@ fn find_video_in_dir(dir: &Path) -> Result<PathBuf> {
     )))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrackingDialogStep {
+    Query,
+    Group,
+    Quality,
+    Confirm,
+}
+
+pub struct TrackingDialogState {
+    pub step: TrackingDialogStep,
+    pub input_query: String,
+    pub input_group: String,
+    pub input_quality: String,
+}
+
+impl Default for TrackingDialogState {
+    fn default() -> Self {
+        Self {
+            step: TrackingDialogStep::Query,
+            input_query: String::new(),
+            input_group: String::new(),
+            input_quality: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum View {
     Library,
     Episodes,
     Search,
     Downloads,
     MoveDialog,
+    TrackingDialog, 
+    DeleteDialog,
+    Help,
+    TrackingList,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeleteTarget {
+    Show(usize), // Show index
+    Episode(usize, usize), // Show index, Episode index
+}
+
+pub struct DeleteDialogState {
+    pub target: DeleteTarget,
+    pub name: String,
+    // We intentionally don't store path here to avoid duplication/desync. 
+    // We resolve path at deletion time.
+}
+
+impl Default for DeleteDialogState {
+    fn default() -> Self {
+        Self {
+            target: DeleteTarget::Show(0), // Dummy default
+            name: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +241,7 @@ pub enum AppMessage {
     TorrentAdded(String),
     TorrentError(String),
     TorrentList(Vec<TorrentStatus>),
+    UpdatesFound(Vec<UpdateResult>),
 }
 
 pub struct App {
@@ -194,10 +249,12 @@ pub struct App {
     pub library: Library,
     pub running: bool,
     pub view: View,
+    pub previous_view: View,
     pub accent: Color,
 
     // Library view state
     pub library_state: ListState,
+    pub tracking_list_state: ListState,
     pub episodes_state: ListState,
     pub selected_show_idx: Option<usize>,
 
@@ -219,6 +276,8 @@ pub struct App {
 
     // Move dialog state
     pub move_dialog: MoveDialogState,
+    pub tracking_state: TrackingDialogState,
+    pub delete_dialog_state: DeleteDialogState, // New field
 
     // Async communication
     pub msg_tx: mpsc::UnboundedSender<AppMessage>,
@@ -227,6 +286,8 @@ pub struct App {
     // Clients
     pub nyaa_client: Arc<NyaaClient>,
     pub torrent_client: Option<Arc<AnyTorrentClient>>,
+    pub rpc: Option<DiscordRpc>,
+    pub managed_daemon_handle: Option<std::process::Child>,
 }
 
 impl App {
@@ -248,9 +309,11 @@ impl App {
             library,
             running: true,
             view: View::Library,
+            previous_view: View::Library,
             accent,
 
             library_state,
+            tracking_list_state: ListState::default(),
             episodes_state: ListState::default(),
             selected_show_idx: None,
 
@@ -269,24 +332,36 @@ impl App {
             downloads_state: ListState::default(),
 
             move_dialog: MoveDialogState::default(),
+            tracking_state: TrackingDialogState::default(),
+            delete_dialog_state: DeleteDialogState::default(),
 
             msg_tx,
             msg_rx,
 
             nyaa_client: Arc::new(NyaaClient::new()),
             torrent_client: torrent_client.map(Arc::new),
+            rpc: Some(DiscordRpc::new("1465518237599928381")),
+            managed_daemon_handle: None, 
         }
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         // Start periodic torrent list refresh
         self.refresh_torrent_list();
+        
+        // Check for tracking updates
+        self.check_for_updates();
+
+        // Launch managed daemon if configured
+        self.spawn_managed_daemon();
 
         while self.running {
             terminal.draw(|frame| self.render(frame))?;
             self.handle_events().await?;
             self.process_messages();
         }
+        
+        self.cleanup();
         Ok(())
     }
 
@@ -319,6 +394,29 @@ impl App {
                         self.downloads_state.select(Some(0));
                     }
                 }
+                AppMessage::UpdatesFound(updates) => {
+                    for update in updates {
+                        if let Some(client) = &self.torrent_client {
+                           info!("Auto-downloading: {} - {}", update.series_title, update.title);
+                           // Async adding of magnets?
+                           // We can't await here easily as process_messages is sync (or should be async?)
+                           // Actually process_messages is Sync. 
+                           // But AnyTorrentClient needs async usually?
+                           // Wait, AnyTorrentClient in src/torrent/mod.rs: 
+                           // pub async fn add_magnet(...)
+                           // So we need to spawn a task.
+                           let client = client.clone(); // Arc
+                           let magnet = update.magnet.clone();
+                           let tx = self.msg_tx.clone();
+                           tokio::spawn(async move {
+                               match client.add_magnet(&magnet).await {
+                                   Ok(_) => { let _ = tx.send(AppMessage::TorrentAdded(magnet)); }
+                                   Err(e) => { let _ = tx.send(AppMessage::TorrentError(e.to_string())); }
+                               }
+                           });
+                        }
+                    }
+                }
             }
         }
     }
@@ -343,12 +441,7 @@ impl App {
                 );
 
                 let help = widgets::help_bar(&[
-                    ("j/k", "navigate"),
-                    ("Enter/l", "select"),
-                    ("/", "search"),
-                    ("d", "downloads"),
-                    ("r", "refresh"),
-                    ("p", "play next"),
+                    ("?", "help"),
                     ("q", "quit"),
                 ]);
                 frame.render_widget(help, help_area);
@@ -367,11 +460,8 @@ impl App {
                 }
 
                 let help = widgets::help_bar(&[
-                    ("j/k", "navigate"),
-                    ("Enter", "play"),
-                    ("Space", "toggle watched"),
-                    ("h/Esc", "back"),
-                    ("q", "quit"),
+                    ("?", "help"),
+                    ("Esc", "back"),
                 ]);
                 frame.render_widget(help, help_area);
             }
@@ -390,10 +480,7 @@ impl App {
                 );
 
                 let help = widgets::help_bar(&[
-                    ("Enter", "search/download"),
-                    ("C-c", "category"),
-                    ("C-f", "filter"),
-                    ("s", "sort"),
+                    ("?", "help"),
                     ("Esc", "back"),
                 ]);
                 frame.render_widget(help, help_area);
@@ -408,11 +495,7 @@ impl App {
                 );
 
                 let help = widgets::help_bar(&[
-                    ("Enter", "play"),
-                    ("m", "move to library"),
-                    ("j/k", "navigate"),
-                    ("p", "pause"),
-                    ("x", "remove"),
+                    ("?", "help"),
                     ("Esc", "back"),
                 ]);
                 frame.render_widget(help, help_area);
@@ -438,6 +521,69 @@ impl App {
                 let help = widgets::help_bar(help_text);
                 frame.render_widget(help, help_area);
             }
+            View::TrackingDialog => {
+                // Render library in background
+                render_library_view(
+                    frame,
+                    main_area,
+                    &self.library.shows,
+                    &mut self.library_state,
+                    self.accent,
+                );
+                // Render dialog overlay
+                self.render_tracking_dialog(frame);
+                
+                let help = widgets::help_bar(&[
+                    ("Enter", "next/confirm"),
+                    ("Esc", "cancel"),
+                ]);
+                frame.render_widget(help, help_area);
+            }
+            View::DeleteDialog => {
+                match self.delete_dialog_state.target {
+                     DeleteTarget::Show(_) => {
+                        render_library_view(frame, main_area, &self.library.shows, &mut self.library_state, self.accent);
+                     }
+                     DeleteTarget::Episode(idx, _) => {
+                         if let Some(show) = self.library.shows.get(idx) {
+                             render_episodes_view(frame, main_area, show, &mut self.episodes_state, self.accent);
+                         }
+                     }
+                }
+                self.render_delete_dialog(frame);
+                let help = widgets::help_bar(&[
+                    ("Enter", "confirm delete"),
+                    ("Esc", "cancel"),
+                ]);
+                frame.render_widget(help, help_area);
+            }
+            View::TrackingList => {
+                self.render_tracking_list(frame, main_area);
+                let help = widgets::help_bar(&[
+                    ("?", "help"), 
+                    ("x", "untrack"),
+                    ("Esc", "back")
+                ]);
+                frame.render_widget(help, help_area);
+            }
+            View::Help => {
+                // Render previous view as background
+                match self.previous_view {
+                    View::Library => render_library_view(frame, main_area, &self.library.shows, &mut self.library_state, self.accent),
+                    View::Episodes => {
+                        if let Some(idx) = self.selected_show_idx {
+                            if let Some(show) = self.library.shows.get(idx) {
+                                render_episodes_view(frame, main_area, show, &mut self.episodes_state, self.accent);
+                            }
+                        }
+                    }
+                    View::Search => render_search_view(frame, main_area, &self.search_query, &self.search_results, &mut self.search_state, self.search_loading, self.search_category, self.search_filter, self.search_sort, self.accent),
+                    View::Downloads => render_downloads_view(frame, main_area, &self.torrents, &mut self.downloads_state, self.accent),
+                    View::TrackingList => self.render_tracking_list(frame, main_area),
+                    _ => {} // Don't render background for dialogs if active (usually help is global, but dialogs have their own help)
+                }
+                self.render_help(frame);
+            }
         }
     }
 
@@ -460,6 +606,10 @@ impl App {
                     View::Search => self.handle_search_input(key)?,
                     View::Downloads => self.handle_downloads_input(key.code).await?,
                     View::MoveDialog => self.handle_move_dialog_input(key.code)?,
+                    View::TrackingDialog => self.handle_tracking_input(key.code).await?,
+                    View::DeleteDialog => self.handle_delete_dialog_input(key.code)?,
+                    View::Help => self.handle_help_input(key.code)?,
+                    View::TrackingList => self.handle_tracking_list_input(key.code)?,
                 }
             }
         }
@@ -495,6 +645,21 @@ impl App {
             KeyCode::Char('p') => {
                 self.play_next_unwatched()?;
             }
+            KeyCode::Char('t') => {
+                self.open_tracking_dialog();
+            }
+            KeyCode::Char('x') => {
+                self.open_delete_show_dialog();
+            }
+            KeyCode::Char('T') => {
+                 self.view = View::TrackingList;
+                 if !self.library.tracked_shows.is_empty() {
+                     self.tracking_list_state.select(Some(0));
+                 }
+            }
+            KeyCode::Char('?') => {
+                self.toggle_help();
+            }
             _ => {}
         }
         Ok(())
@@ -520,6 +685,12 @@ impl App {
             }
             KeyCode::Char(' ') => {
                 self.toggle_watched();
+            }
+            KeyCode::Char('x') => {
+                 self.open_delete_episode_dialog();
+            }
+            KeyCode::Char('?') => {
+                self.toggle_help();
             }
             _ => {}
         }
@@ -604,6 +775,9 @@ impl App {
                 KeyCode::Up | KeyCode::Char('k')  => {
                     self.move_selection_up(&View::Search);
                 }
+                KeyCode::Char('?') => {
+                    self.toggle_help();
+                }
                 KeyCode::Char(c) => {
                     self.search_query.push(c);
                 }
@@ -659,8 +833,14 @@ impl App {
             KeyCode::Char('m') => {
                 self.open_move_dialog();
             }
+            KeyCode::Char('t') => {
+                self.open_tracking_dialog();
+            }
             KeyCode::Enter => {
                 self.play_selected_download()?;
+            }
+            KeyCode::Char('?') => {
+                self.toggle_help();
             }
             _ => {}
         }
@@ -680,6 +860,7 @@ impl App {
             }
             View::Search => (&mut self.search_state, self.filtered_search_results.len()),
             View::Downloads | View::MoveDialog => (&mut self.downloads_state, self.torrents.len()),
+            View::TrackingDialog | View::DeleteDialog | View::Help | View::TrackingList => return,
         };
 
         if len == 0 {
@@ -706,6 +887,7 @@ impl App {
             }
             View::Search => (&mut self.search_state, self.filtered_search_results.len()),
             View::Downloads | View::MoveDialog => (&mut self.downloads_state, self.torrents.len()),
+            View::TrackingDialog | View::DeleteDialog | View::Help | View::TrackingList => return,
         };
 
         if len > 0 {
@@ -755,6 +937,7 @@ impl App {
         };
 
         let show_id = show.id.clone();
+        let show_title = show.title.clone();
         let episode_number = episode.number;
 
         // Check if file is compressed and decompress to temp if needed
@@ -778,8 +961,21 @@ impl App {
         };
 
         let mut player = ExternalPlayer::new(player_cmd, args);
+
+        // RPC: Set activity
+        if let Some(rpc) = &mut self.rpc {
+            let details = format!("Watching {} on miru", show_title);
+            let state = format!("Episode {}", episode_number);
+            rpc.set_activity(&state, &details);
+        }
+
         player.play(&play_path, start_pos)?;
         player.wait()?;
+
+        // RPC: Clear activity
+        if let Some(rpc) = &mut self.rpc {
+            rpc.clear();
+        }
 
         // Clean up temp file if we decompressed
         if let Some(temp) = temp_path {
@@ -800,7 +996,7 @@ impl App {
         };
 
         // Scope to borrow show/episode
-        let (show_id, episode_number, path, start_pos) = {
+        let (show_id, show_title, episode_number, path, start_pos) = {
             let show = &self.library.shows[show_idx];
             let Some(episode) = show.next_unwatched() else {
                 return Ok(());
@@ -812,7 +1008,7 @@ impl App {
             } else {
                 None
             };
-            (show.id.clone(), episode.number, path, start_pos)
+            (show.id.clone(), show.title.clone(), episode.number, path, start_pos)
         };
 
         // Check if file is compressed and decompress to temp if needed
@@ -836,8 +1032,21 @@ impl App {
         };
 
         let mut player = ExternalPlayer::new(player_cmd, args);
+
+        // RPC: Set activity
+        if let Some(rpc) = &mut self.rpc {
+            let details = format!("Watching {} on Miru", show_title);
+            let state = format!("Episode {}", episode_number);
+            rpc.set_activity(&state, &details);
+        }
+
         player.play(&play_path, start_pos)?;
         player.wait()?;
+
+        // RPC: Clear activity
+        if let Some(rpc) = &mut self.rpc {
+            rpc.clear();
+        }
 
         // Clean up temp file if we decompressed
         if let Some(temp) = temp_path {
@@ -1069,35 +1278,14 @@ impl App {
         let Some(idx) = self.downloads_state.selected() else {
             return;
         };
-        let Some(torrent) = self.torrents.get(idx) else {
-            return;
-        };
 
-        // Only allow moving completed torrents
-        if torrent.progress < 1.0 {
-            debug!("Cannot move incomplete torrent");
+        if idx >= self.torrents.len() {
             return;
         }
 
-        let content_path = Path::new(&torrent.content_path);
+        let original_filename = &self.torrents[idx].name;
         
-        // Find the actual video file
-        let video_path = if content_path.is_file() {
-            content_path.to_path_buf()
-        } else if content_path.is_dir() {
-            match find_video_in_dir(content_path) {
-                Ok(p) => p,
-                Err(_) => return,
-            }
-        } else {
-            return;
-        };
-
-        let original_filename = video_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&torrent.name);
-        
+        // Clean up filename for suggest new show name
         let clean_name = clean_filename(original_filename);
         let media_dirs: Vec<PathBuf> = self.config.expanded_media_dirs();
 
@@ -1116,13 +1304,128 @@ impl App {
             shows_in_dir: Vec::new(),
             show_state: ListState::default(),
             selected_show: None,
-            new_show_name: String::new(),
+            new_show_name: clean_name.clone(),
             creating_new: false,
-            filename: clean_name,
-            original_path: video_path,
-        };
+            filename: clean_name.clone(), // Use cleaned name as default destination filename
+            original_path: {
+                let path = Path::new(&self.torrents[idx].save_path).join(original_filename);
+                info!(
+                    "Opening move dialog. Torrent: '{}', Save Path: '{}', Constructed Path: '{}', Exists: {}", 
+                    original_filename, 
+                    self.torrents[idx].save_path, 
+                    path.display(), 
+                    path.exists()
+                );
+                if !path.exists() {
+                    // Try to find file with video extension
+                    let mut found_path = None;
+                    for ext in VIDEO_EXTENSIONS {
+                         let path_with_ext = Path::new(&self.torrents[idx].save_path).join(format!("{}.{}", original_filename, ext));
+                         if path_with_ext.exists() {
+                             info!("Found match with extension: {}", path_with_ext.display());
+                             found_path = Some(path_with_ext);
+                             break;
+                         }
+                    }
 
+                    if let Some(p) = found_path {
+                        p
+                    } else {
+                        error!("Constructed path does NOT exist and no extension match found.");
+                        path
+                    }
+                } else {
+                    path
+                }
+            },
+
+        };
+        
         self.view = View::MoveDialog;
+    }
+
+    fn open_tracking_dialog(&mut self) {
+        self.tracking_state = TrackingDialogState::default();
+        self.view = View::TrackingDialog;
+    }
+
+    async fn handle_tracking_input(&mut self, key: KeyCode) -> Result<()> {
+        match key {
+            KeyCode::Esc => {
+                self.view = View::Library;
+            }
+            KeyCode::Enter => {
+                match self.tracking_state.step {
+                    TrackingDialogStep::Query => {
+                        if !self.tracking_state.input_query.is_empty() {
+                            self.tracking_state.step = TrackingDialogStep::Group;
+                        }
+                    }
+                    TrackingDialogStep::Group => {
+                        self.tracking_state.step = TrackingDialogStep::Quality;
+                    }
+                    TrackingDialogStep::Quality => {
+                        self.tracking_state.step = TrackingDialogStep::Confirm;
+                    }
+                    TrackingDialogStep::Confirm => {
+                        // Create and add the tracked series
+                        let query = self.tracking_state.input_query.trim().to_string();
+                        // Generate ID from query if simple, or just use query as title base
+                        let id = crate::library::parser::make_show_id(&query);
+                        
+                        let series = TrackedSeries {
+                            id: id.clone(),
+                            title: query.clone(),
+                            query: query,
+                            filter_group: if self.tracking_state.input_group.trim().is_empty() { None } else { Some(self.tracking_state.input_group.trim().to_string()) },
+                            filter_quality: if self.tracking_state.input_quality.trim().is_empty() { None } else { Some(self.tracking_state.input_quality.trim().to_string()) },
+                            min_episode: 0,
+                        };
+                        
+                        self.library.tracked_shows.push(series);
+                        self.library.save()?;
+                        self.view = View::Library;
+                        
+                        // Trigger check immediately?
+                        self.check_for_updates();
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                let input = match self.tracking_state.step {
+                    TrackingDialogStep::Query => &mut self.tracking_state.input_query,
+                    TrackingDialogStep::Group => &mut self.tracking_state.input_group,
+                    TrackingDialogStep::Quality => &mut self.tracking_state.input_quality,
+                    TrackingDialogStep::Confirm => return Ok(()),
+                };
+                input.pop();
+            }
+            KeyCode::Char(c) => {
+                 let input = match self.tracking_state.step {
+                    TrackingDialogStep::Query => &mut self.tracking_state.input_query,
+                    TrackingDialogStep::Group => &mut self.tracking_state.input_group,
+                    TrackingDialogStep::Quality => &mut self.tracking_state.input_quality,
+                    TrackingDialogStep::Confirm => return Ok(()),
+                };
+                input.push(c);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn check_for_updates(&self) { 
+        // Helper to spawn update task
+        let library = self.library.clone(); // Clone library (might be heavy but necessary for thread safety)
+        let client = self.nyaa_client.clone();
+        let tx = self.msg_tx.clone();
+        
+        tokio::spawn(async move {
+            let updates = tracking::check_for_updates(&library, &client).await;
+            if !updates.is_empty() {
+                let _ = tx.send(AppMessage::UpdatesFound(updates));
+            }
+        });
     }
 
     fn handle_move_dialog_input(&mut self, key: KeyCode) -> Result<()> {
@@ -1377,22 +1680,63 @@ impl App {
         let dest_path = dest_dir.join(&self.move_dialog.filename);
         let source_path = &self.move_dialog.original_path;
 
+        let real_source_path = if source_path.is_dir() {
+            info!("Source is directory: {}", source_path.display());
+            match find_video_in_dir(source_path) {
+                Ok(p) => {
+                    info!("Found video in dir: {}", p.display());
+                    p
+                }
+                Err(e) => {
+                    error!("Failed to find video in dir {}: {}", source_path.display(), e);
+                    return Err(e);
+                }
+            }
+        } else {
+            info!("Source is file: {}", source_path.display());
+            source_path.clone()
+        };
+
+        if !real_source_path.exists() {
+             error!("Source file does not exist: {}", real_source_path.display());
+             // This will likely cause the rename/copy error next
+        }
+
         debug!(
-            source = %source_path.display(),
+            source = %real_source_path.display(),
             dest = %dest_path.display(),
             "Moving file"
         );
 
         // Try rename first (same filesystem), fall back to copy+delete
-        if std::fs::rename(source_path, &dest_path).is_err() {
-            std::fs::copy(source_path, &dest_path)?;
-            std::fs::remove_file(source_path)?;
+        if std::fs::rename(&real_source_path, &dest_path).is_err() {
+            std::fs::copy(&real_source_path, &dest_path)?;
+            std::fs::remove_file(&real_source_path)?;
         }
 
         // Compress if enabled
         if self.config.general.compress_episodes {
             info!(path = %dest_path.display(), "Compressing episode");
             compression::compress_file(&dest_path, self.config.general.compression_level)?;
+        }
+
+        // Remove from torrent client
+        if let Some(client) = self.torrent_client.clone() {
+             // We use the index from when the dialog was opened. 
+             // Ideally we should have stored the hash in MoveDialogState to be safe against list updates.
+             // But for now, assuming list hasn't shifted significantly (since we block UI interaction with dialog).
+             if let Some(torrent) = self.torrents.get(self.move_dialog.torrent_idx) {
+                  let hash = torrent.hash.clone();
+                  let name = torrent.name.clone();
+                  let tx = self.msg_tx.clone();
+                  tokio::spawn(async move {
+                      info!("Removing moved torrent from client: {}", name);
+                      // delete_files=false because we already moved/renamed the files on disk
+                      if let Err(e) = client.remove(&hash, false).await {
+                           let _ = tx.send(AppMessage::TorrentError(e.to_string()));
+                      }
+                  });
+             }
         }
 
         // Refresh library to pick up the new file
@@ -1402,6 +1746,346 @@ impl App {
         self.view = View::Downloads;
 
         Ok(())
+    }
+    fn render_tracking_dialog(&self, frame: &mut Frame) {
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+        use ratatui::layout::{Constraint, Layout, Rect};
+        use ratatui::text::{Line, Text};
+        use ratatui::style::Style;
+
+        let area = frame.area();
+        let dialog_area = Rect {
+            x: area.width.saturating_sub(60) / 2,
+            y: area.height.saturating_sub(10) / 2,
+            width: 60,
+            height: 10,
+        };
+
+        frame.render_widget(Clear, dialog_area);
+        
+        let block = Block::default()
+            .title(" Track New Series ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.accent));
+        
+        let inner_area = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        let layout = Layout::default()
+            .constraints([Constraint::Length(2), Constraint::Length(3), Constraint::Min(1)])
+            .split(inner_area);
+
+        let (step_text, input_text) = match self.tracking_state.step {
+            TrackingDialogStep::Query => ("Step 1/3: Enter Search Query (e.g. 'Fate Strange Fake')", self.tracking_state.input_query.as_str()),
+            TrackingDialogStep::Group => ("Step 2/3: Enter Release Group Filter (Optional)", self.tracking_state.input_group.as_str()),
+            TrackingDialogStep::Quality => ("Step 3/3: Enter Quality Filter (Optional)", self.tracking_state.input_quality.as_str()),
+            TrackingDialogStep::Confirm => ("Adding series...", ""),
+        };
+
+        frame.render_widget(Paragraph::new(step_text).style(Style::default().fg(Color::Cyan)), layout[0]);
+        
+        frame.render_widget(
+            Paragraph::new(format!("> {}", input_text))
+                .style(Style::default().fg(Color::White))
+                .block(Block::default().borders(Borders::BOTTOM)), 
+            layout[1]
+        );
+        
+        // Show current filters
+        if !self.tracking_state.input_group.is_empty() || !self.tracking_state.input_quality.is_empty() {
+             let summary = format!("Group: {}, Quality: {}", 
+                if self.tracking_state.input_group.is_empty() { "Any" } else { &self.tracking_state.input_group },
+                if self.tracking_state.input_quality.is_empty() { "Any" } else { &self.tracking_state.input_quality }
+             );
+             frame.render_widget(Paragraph::new(summary).style(Style::default().fg(Color::DarkGray)), layout[2]);
+        }
+    }
+
+    fn spawn_managed_daemon(&mut self) {
+        if let Some(cmd) = &self.config.torrent.managed_daemon_command {
+            info!("Launching managed daemon: {}", cmd);
+            let mut command = std::process::Command::new(cmd);
+            
+            if let Some(args) = &self.config.torrent.managed_daemon_args {
+                command.args(args);
+            }
+
+            // Suppress output
+            command.stdout(std::process::Stdio::null());
+            command.stderr(std::process::Stdio::null());
+
+            // Spawn and track
+            match command.spawn() {
+                Ok(child) => {
+                    info!("Daemon launched successfully (PID: {})", child.id());
+                    self.managed_daemon_handle = Some(child);
+                }
+                Err(e) => error!("Failed to launch daemon: {}", e),
+            }
+        }
+    }
+
+    fn cleanup(&mut self) {
+        if let Some(mut child) = self.managed_daemon_handle.take() {
+            info!("Stopping managed daemon (PID: {})", child.id());
+            
+            // Try SIGTERM first via kill command
+            let pid = child.id().to_string();
+            let _ = std::process::Command::new("kill")
+                .arg(&pid)
+                .output();
+        }
+    }
+
+    fn open_delete_show_dialog(&mut self) {
+        if let Some(idx) = self.library_state.selected() {
+            if let Some(show) = self.library.shows.get(idx) {
+                self.delete_dialog_state = DeleteDialogState {
+                    target: DeleteTarget::Show(idx),
+                    name: show.title.clone(),
+                };
+                self.view = View::DeleteDialog;
+            }
+        }
+    }
+
+    fn open_delete_episode_dialog(&mut self) {
+        if let Some(show_idx) = self.selected_show_idx {
+            if let Some(ep_idx) = self.episodes_state.selected() {
+                if let Some(show) = self.library.shows.get(show_idx) {
+                    if let Some(ep) = show.episodes.get(ep_idx) {
+                        self.delete_dialog_state = DeleteDialogState {
+                            target: DeleteTarget::Episode(show_idx, ep_idx),
+                            name: format!("Episode {}", ep.number),
+                        };
+                        self.view = View::DeleteDialog;
+                    }
+                }
+            }
+        }
+    }
+    
+    fn handle_delete_dialog_input(&mut self, key: KeyCode) -> Result<()> {
+        match key {
+            KeyCode::Esc => {
+                // Cancel
+                match self.delete_dialog_state.target {
+                    DeleteTarget::Show(_) => self.view = View::Library,
+                    DeleteTarget::Episode(_, _) => self.view = View::Episodes,
+                }
+            }
+            KeyCode::Enter => {
+                // Confirm delete
+                match self.delete_dialog_state.target {
+                    DeleteTarget::Show(idx) => {
+                        if let Some(show) = self.library.shows.get(idx) {
+                             info!("Deleting show: {}", show.title);
+                             if show.path.exists() {
+                                 std::fs::remove_dir_all(&show.path)?;
+                             }
+                             // Remove from library (tracked shows too?)
+                             // If it's a tracked show, we should probably remove the tracker too.
+                             // But Library struct separates them.
+                             // For now, remove from `shows`. 
+                             self.library.shows.remove(idx);
+                             self.library.save()?;
+                        }
+                        self.view = View::Library;
+                        self.library_state.select(None); 
+                    }
+                    DeleteTarget::Episode(show_idx, ep_idx) => {
+                         if let Some(show) = self.library.shows.get_mut(show_idx) {
+                             if let Some(ep) = show.episodes.get(ep_idx) {
+                                  let path = ep.full_path(&show.path);
+                                  info!("Deleting episode file: {:?}", path);
+                                  if path.exists() {
+                                      std::fs::remove_file(path)?;
+                                  }
+                                  show.episodes.remove(ep_idx);
+                                  // Update total count? Maybe not necessary as it's optional.
+                             }
+                             self.library.save()?;
+                         }
+                         self.view = View::Episodes;
+                         self.episodes_state.select(None);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn render_delete_dialog(&self, frame: &mut Frame) {
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+        use ratatui::layout::{Alignment, Rect};
+        use ratatui::style::{Color, Style, Modifier};
+        use ratatui::text::{Line, Text}; // Changed from Span to Text
+
+        let area = frame.area();
+        let dialog_area = Rect {
+            x: area.width.saturating_sub(50) / 2,
+            y: area.height.saturating_sub(6) / 2,
+            width: 50,
+            height: 6,
+        };
+
+        frame.render_widget(Clear, dialog_area);
+        
+        let block = Block::default()
+            .title(" Confirm Deletion ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
+            
+        let inner_area = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+        
+        // Use Text directly or Line
+        let text = Text::from(vec![
+            Line::from(vec![
+                "Are you sure you want to delete:".into(),
+            ]),
+            Line::from(vec![
+                 ratatui::text::Span::styled(&self.delete_dialog_state.name, Style::default().add_modifier(Modifier::BOLD).fg(Color::Red)),
+            ]),
+            Line::from(""),
+            Line::from("This action cannot be undone."),
+        ]);
+        
+        let para = Paragraph::new(text).alignment(Alignment::Center);
+        frame.render_widget(para, inner_area);
+    }
+    fn toggle_help(&mut self) {
+        if self.view == View::Help {
+            self.view = self.previous_view;
+        } else {
+            self.previous_view = self.view;
+            self.view = View::Help;
+        }
+    }
+
+    fn render_help(&self, frame: &mut Frame) {
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Table, Row};
+        use ratatui::layout::{Constraint, Layout, Rect};
+        use ratatui::style::{Color, Style, Modifier};
+        use ratatui::text::{Line, Text};
+
+        let area = frame.area();
+        let dialog_area = Rect {
+            x: area.width.saturating_sub(80) / 2,
+            y: area.height.saturating_sub(30) / 2,
+            width: 80,
+            height: 30,
+        };
+
+        frame.render_widget(Clear, dialog_area);
+        
+        let block = Block::default()
+            .title(" Help ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.accent));
+            
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        let rows = vec![
+            Row::new(vec!["Global", "?", "Toggle Help"]),
+            Row::new(vec!["", "q", "Quit"]),
+            Row::new(vec!["Library", "j/k", "Navigate"]),
+            Row::new(vec!["", "Enter/l", "View Episodes"]),
+            Row::new(vec!["", "/", "Search Nyaa"]),
+            Row::new(vec!["", "t", "Track New Series"]),
+            Row::new(vec!["", "T", "View Tracked Shows"]),
+            Row::new(vec!["", "x", "Delete Show"]),
+            Row::new(vec!["", "r", "Refresh"]),
+            Row::new(vec!["Episodes", "Enter", "Play"]),
+            Row::new(vec!["", "Space", "Toggle Watched"]),
+            Row::new(vec!["", "x", "Delete Episode"]),
+            Row::new(vec!["Search", "Enter", "Download"]),
+            Row::new(vec!["", "Tab", "Navigate Results"]),
+            Row::new(vec!["Downloads", "p", "Pause/Resume"]),
+            Row::new(vec!["", "x", "Remove"]),
+            Row::new(vec!["", "m", "Move to Library"]),
+        ];
+
+        let table = Table::new(rows, &[
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(60),
+        ])
+        .header(Row::new(vec!["Context", "Key", "Action"]).style(Style::default().add_modifier(Modifier::BOLD).fg(self.accent)))
+        .block(Block::default().borders(Borders::NONE));
+        
+        frame.render_widget(table, inner);
+    }
+
+    fn handle_help_input(&mut self, key: KeyCode) -> Result<()> {
+        match key {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                self.toggle_help();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_tracking_list_input(&mut self, key: KeyCode) -> Result<()> {
+         match key {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('T') => {
+                self.view = View::Library;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let len = self.library.tracked_shows.len();
+                if len > 0 {
+                    let next = self.tracking_list_state.selected()
+                        .map(|i| (i + 1).min(len - 1))
+                        .unwrap_or(0);
+                    self.tracking_list_state.select(Some(next));
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                let next = self.tracking_list_state.selected()
+                    .map(|i| i.saturating_sub(1))
+                    .unwrap_or(0);
+                self.tracking_list_state.select(Some(next));
+            }
+            KeyCode::Char('x') | KeyCode::Char('d') => {
+                if let Some(idx) = self.tracking_list_state.selected() {
+                    if idx < self.library.tracked_shows.len() {
+                        self.library.tracked_shows.remove(idx);
+                        self.library.save()?;
+                        // Adjust selection
+                        let len = self.library.tracked_shows.len(); 
+                        if len == 0 {
+                            self.tracking_list_state.select(None);
+                        } else if idx >= len {
+                            self.tracking_list_state.select(Some(len - 1));
+                        }
+                    }
+                }
+            }
+             _ => {}
+         }
+         Ok(())
+    }
+
+    fn render_tracking_list(&mut self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        use ratatui::widgets::{Block, Borders, List, ListItem};
+        use ratatui::style::{Style, Modifier, Color};
+
+        let items: Vec<ListItem> = self.library.tracked_shows.iter()
+            .map(|s| {
+                let title = format!("{} (Query: {})", s.title, s.query);
+                ListItem::new(title)
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(Block::default().title(" Tracked Shows ").borders(Borders::ALL).border_style(Style::default().fg(self.accent)))
+            .highlight_style(Style::default().fg(self.accent).add_modifier(Modifier::BOLD))
+            .highlight_symbol("> ");
+
+        frame.render_stateful_widget(list, area, &mut self.tracking_list_state);
     }
 }
 

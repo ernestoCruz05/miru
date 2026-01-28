@@ -50,3 +50,4 @@ zstd = "0.13"
 
 # Temp files
 tempfile = "3"
+discord-rich-presence = "1.1.0"
