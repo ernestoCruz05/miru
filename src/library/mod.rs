@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod models;
 pub mod parser;
 pub mod scanner;
@@ -8,7 +9,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-pub use models::{Episode, Show};
+pub use models::{Episode, Season, Show};
 pub use scanner::scan_all_media_dirs;
 
 use crate::config::library_path;

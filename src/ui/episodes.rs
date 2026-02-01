@@ -6,9 +6,43 @@ use ratatui::{
     Frame,
 };
 
-use crate::library::Show;
+use crate::library::{models::Episode, Show};
 
 use super::widgets::{format_episode_num, titled_block};
+
+/// Render an episode item
+fn episode_list_item(ep: &Episode, indent: &str) -> ListItem<'static> {
+    let status_icon = if ep.watched { "✓" } else { "○" };
+    let status_color = if ep.watched {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
+
+    let mut spans = vec![
+        Span::raw(indent.to_string()),
+        Span::styled(status_icon.to_string(), Style::default().fg(status_color)),
+        Span::raw(" "),
+        Span::styled(
+            format_episode_num(ep.number),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" - "),
+        Span::raw(ep.filename.clone()),
+    ];
+
+    // Show resume indicator if there's a saved position
+    if ep.last_position > 0 && !ep.watched {
+        let mins = ep.last_position / 60;
+        let secs = ep.last_position % 60;
+        spans.push(Span::styled(
+            format!(" ({}:{:02})", mins, secs),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
+    ListItem::new(Line::from(spans))
+}
 
 pub fn render_episodes_view(
     frame: &mut Frame,
@@ -17,43 +51,87 @@ pub fn render_episodes_view(
     list_state: &mut ListState,
     accent: Color,
 ) {
-    let items: Vec<ListItem> = show
-        .episodes
-        .iter()
-        .map(|ep| {
-            let status_icon = if ep.watched { "✓" } else { "○" };
-            let status_color = if ep.watched {
+    let mut items: Vec<ListItem> = Vec::new();
+
+    if show.is_seasonal() {
+        // Render seasons with their episodes
+        for season in &show.seasons {
+            // Season header
+            let watched = season.episodes.iter().filter(|e| e.watched).count();
+            let total = season.episodes.len();
+            let progress_color = if watched == total && total > 0 {
                 Color::Green
+            } else if watched > 0 {
+                Color::Yellow
             } else {
                 Color::DarkGray
             };
 
-            let mut spans = vec![
-                Span::styled(status_icon, Style::default().fg(status_color)),
-                Span::raw(" "),
+            items.push(ListItem::new(Line::from(vec![
                 Span::styled(
-                    format_episode_num(ep.number),
-                    Style::default().add_modifier(Modifier::BOLD),
+                    format!("▸ Season {} ", season.number),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" - "),
-                Span::raw(&ep.filename),
-            ];
+                Span::styled(
+                    format!("({}/{})", watched, total),
+                    Style::default().fg(progress_color),
+                ),
+            ])));
 
-            // Show resume indicator if there's a saved position
-            if ep.last_position > 0 && !ep.watched {
-                let mins = ep.last_position / 60;
-                let secs = ep.last_position % 60;
-                spans.push(Span::styled(
-                    format!(" ({}:{:02})", mins, secs),
-                    Style::default().fg(Color::Yellow),
-                ));
+            // Season episodes (indented)
+            for ep in &season.episodes {
+                items.push(episode_list_item(ep, "  "));
             }
+        }
 
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
+        // Render specials if present
+        if !show.specials.is_empty() {
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(
+                    "▸ Specials ",
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("({})", show.specials.len()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])));
 
-    let title = format!("{} - Episodes", show.title);
+            for ep in &show.specials {
+                items.push(episode_list_item(ep, "  "));
+            }
+        }
+
+        // Also show loose episodes if any
+        if !show.episodes.is_empty() {
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(
+                    "▸ Episodes ",
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("({})", show.episodes.len()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])));
+
+            for ep in &show.episodes {
+                items.push(episode_list_item(ep, "  "));
+            }
+        }
+    } else {
+        // Flat episode list (traditional non-seasonal show)
+        for ep in &show.episodes {
+            items.push(episode_list_item(ep, ""));
+        }
+    }
+
+    let title = if show.is_seasonal() {
+        format!("{} - {} Seasons", show.title, show.seasons.len())
+    } else {
+        format!("{} - Episodes", show.title)
+    };
+
     let list = List::new(items)
         .block(titled_block(&title, accent))
         .highlight_style(

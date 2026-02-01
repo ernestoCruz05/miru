@@ -37,23 +37,32 @@ pub fn render_library_view(
                 Color::DarkGray
             };
 
-            let next_info = if let Some(next) = show.next_unwatched() {
-                Span::styled(
-                    format!("  Next: Ep {}", next.number),
-                    Style::default().fg(Color::Cyan),
-                )
-            } else {
-                Span::raw("")
-            };
-
-            let line = Line::from(vec![
+            // Build spans for the line
+            let mut spans = vec![
                 Span::raw(&show.title),
                 Span::raw(" "),
-                Span::styled(progress, Style::default().fg(progress_color)),
-                next_info,
-            ]);
+            ];
 
-            ListItem::new(line)
+            // Add seasonal indicator if show has seasons
+            if show.is_seasonal() {
+                spans.push(Span::styled(
+                    format!("[{}S] ", show.seasons.len()),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                ));
+            }
+
+            // Add progress
+            spans.push(Span::styled(progress, Style::default().fg(progress_color)));
+
+            // Add next episode info
+            if let Some(next) = show.next_unwatched() {
+                spans.push(Span::styled(
+                    format!("  Next: Ep {}", next.number),
+                    Style::default().fg(Color::Cyan),
+                ));
+            }
+
+            ListItem::new(Line::from(spans))
         })
         .collect();
 

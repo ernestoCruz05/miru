@@ -208,7 +208,35 @@ impl Default for DeleteDialogState {
 pub enum MoveDialogStep {
     SelectMediaDir,
     SelectShow,
+    /// Preview batch structure and choose strategy (only for batches)
+    BatchPreview,
     EditFilename,
+}
+
+/// Strategy for moving batch downloads
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BatchMoveStrategy {
+    /// Preserve the original folder structure (Season 1/, OVAs/, etc.)
+    #[default]
+    PreserveStructure,
+    /// Flatten all episodes into a single folder
+    Flatten,
+}
+
+impl BatchMoveStrategy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BatchMoveStrategy::PreserveStructure => "Preserve Structure",
+            BatchMoveStrategy::Flatten => "Flatten All",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            BatchMoveStrategy::PreserveStructure => BatchMoveStrategy::Flatten,
+            BatchMoveStrategy::Flatten => BatchMoveStrategy::PreserveStructure,
+        }
+    }
 }
 
 /// State for the move-to-library dialog
@@ -225,6 +253,10 @@ pub struct MoveDialogState {
     pub creating_new: bool,
     pub filename: String,
     pub original_path: PathBuf,
+    /// Batch analysis results (if source is a batch folder)
+    pub batch_analysis: Option<crate::library::batch::BatchAnalysis>,
+    /// Selected strategy for batch moves
+    pub batch_strategy: BatchMoveStrategy,
 }
 
 impl Default for MoveDialogState {
@@ -242,6 +274,8 @@ impl Default for MoveDialogState {
             creating_new: false,
             filename: String::new(),
             original_path: PathBuf::new(),
+            batch_analysis: None,
+            batch_strategy: BatchMoveStrategy::default(),
         }
     }
 }
@@ -602,6 +636,7 @@ impl App {
                 let help_text = match self.move_dialog.step {
                     MoveDialogStep::SelectMediaDir => &[("j/k", "navigate"), ("Enter", "select"), ("Esc", "cancel")][..],
                     MoveDialogStep::SelectShow => &[("j/k", "navigate"), ("Enter", "select"), ("n", "new folder"), ("Esc", "back")][..],
+                    MoveDialogStep::BatchPreview => &[("Tab/s", "change strategy"), ("Enter", "move"), ("Esc", "back")][..],
                     MoveDialogStep::EditFilename => &[("Enter", "confirm"), ("Esc", "back")][..],
                 };
                 let help = widgets::help_bar(help_text);
@@ -1407,6 +1442,37 @@ impl App {
         let clean_name = clean_filename(original_filename);
         let media_dirs: Vec<PathBuf> = self.config.expanded_media_dirs();
 
+        let original_path = PathBuf::from(&self.torrents[idx].content_path);
+        
+        info!(
+            "Opening move dialog. Torrent: '{}', Content Path: '{}', Exists: {}", 
+            original_filename, 
+            original_path.display(), 
+            original_path.exists()
+        );
+        
+        if !original_path.exists() {
+            error!("Content path reported by torrent client does NOT exist: {}", original_path.display());
+        }
+
+        // Analyze if this is a batch download
+        let batch_analysis = if original_path.is_dir() {
+            let analysis = crate::library::batch::analyze_batch(&original_path);
+            if analysis.is_batch {
+                info!(
+                    "Detected batch download: {} videos, {} seasons, specials: {}", 
+                    analysis.total_videos,
+                    analysis.seasons.len(),
+                    analysis.specials.total_count()
+                );
+                Some(analysis)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         self.move_dialog = MoveDialogState {
             step: MoveDialogStep::SelectMediaDir,
             torrent_idx: idx,
@@ -1424,26 +1490,10 @@ impl App {
             selected_show: None,
             new_show_name: clean_name.clone(),
             creating_new: false,
-            filename: clean_name.clone(), // Use cleaned name as default destination filename
-            original_path: {
-                let path = PathBuf::from(&self.torrents[idx].content_path);
-                info!(
-                    "Opening move dialog. Torrent: '{}', Content Path: '{}', Exists: {}", 
-                    original_filename, 
-                    path.display(), 
-                    path.exists()
-                );
-                
-                if !path.exists() {
-                     error!("Content path reported by torrent client does NOT exist: {}", path.display());
-                     // Fallback to old construction logic JUST IN CASE client reports weird paths?
-                     // Actually, if client says path is X, it should be X. 
-                     // But maybe we can keep the save_path join as a backup if content_path is empty/invalid?
-                     // For now, let's trust content_path but log heavily if missing.
-                }
-                path
-            },
-
+            filename: clean_name.clone(),
+            original_path,
+            batch_analysis,
+            batch_strategy: BatchMoveStrategy::default(),
         };
         
         self.view = View::MoveDialog;
@@ -1595,8 +1645,13 @@ impl App {
                         KeyCode::Enter => {
                             if !self.move_dialog.new_show_name.is_empty() {
                                 self.move_dialog.selected_show = Some(self.move_dialog.new_show_name.clone());
-                                self.move_dialog.step = MoveDialogStep::EditFilename;
                                 self.move_dialog.creating_new = false;
+                                // Route to BatchPreview if this is a batch, otherwise to EditFilename
+                                if self.move_dialog.batch_analysis.is_some() {
+                                    self.move_dialog.step = MoveDialogStep::BatchPreview;
+                                } else {
+                                    self.move_dialog.step = MoveDialogStep::EditFilename;
+                                }
                             }
                         }
                         KeyCode::Backspace => {
@@ -1635,12 +1690,35 @@ impl App {
                             if let Some(idx) = self.move_dialog.show_state.selected() {
                                 if let Some(show) = self.move_dialog.shows_in_dir.get(idx).cloned() {
                                     self.move_dialog.selected_show = Some(show);
-                                    self.move_dialog.step = MoveDialogStep::EditFilename;
+                                    // Route to BatchPreview if this is a batch, otherwise to EditFilename
+                                    if self.move_dialog.batch_analysis.is_some() {
+                                        self.move_dialog.step = MoveDialogStep::BatchPreview;
+                                    } else {
+                                        self.move_dialog.step = MoveDialogStep::EditFilename;
+                                    }
                                 }
                             }
                         }
                         _ => {}
                     }
+                }
+            }
+            MoveDialogStep::BatchPreview => {
+                match key {
+                    KeyCode::Esc => {
+                        self.move_dialog.step = MoveDialogStep::SelectShow;
+                    }
+                    KeyCode::Tab | KeyCode::Char('s') => {
+                        // Toggle strategy
+                        self.move_dialog.batch_strategy = self.move_dialog.batch_strategy.next();
+                    }
+                    KeyCode::Enter => {
+                        // Execute batch move
+                        if let Err(e) = self.execute_batch_move() {
+                            error!("Failed to move batch: {}. Source may have been deleted or is in use.", e);
+                        }
+                    }
+                    _ => {}
                 }
             }
             MoveDialogStep::EditFilename => {
@@ -1677,9 +1755,10 @@ impl App {
 
         let area = frame.area();
         
-        // Center a dialog box
-        let dialog_width = 60.min(area.width.saturating_sub(4));
-        let dialog_height = 15.min(area.height.saturating_sub(4));
+        // Larger dialog for batch preview
+        let is_batch_preview = self.move_dialog.step == MoveDialogStep::BatchPreview;
+        let dialog_width = if is_batch_preview { 70 } else { 60 }.min(area.width.saturating_sub(4));
+        let dialog_height = if is_batch_preview { 20 } else { 15 }.min(area.height.saturating_sub(4));
         
         let horizontal = Layout::horizontal([Constraint::Length(dialog_width)]).flex(Flex::Center);
         let vertical = Layout::vertical([Constraint::Length(dialog_height)]).flex(Flex::Center);
@@ -1697,6 +1776,7 @@ impl App {
                     "Move to Library - Select Show Folder"
                 }
             }
+            MoveDialogStep::BatchPreview => "Move to Library - Batch Preview",
             MoveDialogStep::EditFilename => "Move to Library - Edit Filename",
         };
 
@@ -1747,6 +1827,72 @@ impl App {
 
                     frame.render_stateful_widget(list, inner, &mut self.move_dialog.show_state.clone());
                 }
+            }
+            MoveDialogStep::BatchPreview => {
+                let dest_path = self.move_dialog.selected_media_dir.as_ref()
+                    .map(|p| p.join(self.move_dialog.selected_show.as_ref().unwrap_or(&String::new())))
+                    .unwrap_or_default();
+
+                let mut lines = vec![
+                    Line::from(vec![
+                        Span::styled("Destination: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(dest_path.display().to_string()),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("Batch detected! ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    ]),
+                ];
+
+                // Show batch analysis summary
+                if let Some(ref analysis) = self.move_dialog.batch_analysis {
+                    lines.push(Line::from(vec![
+                        Span::styled("Contents: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(analysis.summary()),
+                    ]));
+                    lines.push(Line::from(""));
+
+                    // Show season breakdown
+                    if !analysis.seasons.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled("Seasons:", Style::default().fg(Color::Cyan)),
+                        ]));
+                        for season in &analysis.seasons {
+                            lines.push(Line::from(vec![
+                                Span::raw(format!("  {} - {} episode(s)", season.folder_name, season.episodes.len())),
+                            ]));
+                        }
+                    }
+
+                    if !analysis.specials.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("Specials: {} file(s)", analysis.specials.total_count()), Style::default().fg(Color::Magenta)),
+                        ]));
+                    }
+
+                    if !analysis.loose_episodes.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("Loose episodes: {}", analysis.loose_episodes.len()), Style::default().fg(Color::DarkGray)),
+                        ]));
+                    }
+                }
+
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Strategy: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("[{}]", self.move_dialog.batch_strategy.as_str()),
+                        Style::default().fg(self.accent).add_modifier(Modifier::BOLD)
+                    ),
+                    Span::styled(" (Tab or 's' to change)", Style::default().fg(Color::DarkGray)),
+                ]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Press Enter to move, Esc to go back", Style::default().fg(Color::DarkGray)),
+                ]));
+
+                let para = Paragraph::new(lines);
+                frame.render_widget(para, inner);
             }
             MoveDialogStep::EditFilename => {
                 let dest_path = self.move_dialog.selected_media_dir.as_ref()
@@ -1876,6 +2022,164 @@ impl App {
         // Go back to downloads view
         self.view = View::Downloads;
 
+        Ok(())
+    }
+
+    /// Execute a batch move (moving an entire folder structure)
+    fn execute_batch_move(&mut self) -> Result<()> {
+        let Some(media_dir) = &self.move_dialog.selected_media_dir else {
+            return Ok(());
+        };
+        let Some(show_name) = &self.move_dialog.selected_show else {
+            return Ok(());
+        };
+
+        let dest_dir = media_dir.join(show_name);
+        let source_path = &self.move_dialog.original_path;
+
+        // Create destination directory if it doesn't exist
+        if !dest_dir.exists() {
+            std::fs::create_dir_all(&dest_dir)?;
+        }
+
+        info!(
+            "Executing batch move: {} -> {} (strategy: {:?})",
+            source_path.display(),
+            dest_dir.display(),
+            self.move_dialog.batch_strategy
+        );
+
+        match self.move_dialog.batch_strategy {
+            BatchMoveStrategy::PreserveStructure => {
+                // Move the entire folder structure, preserving subdirectories
+                self.move_directory_contents(source_path, &dest_dir)?;
+            }
+            BatchMoveStrategy::Flatten => {
+                // Flatten: move all video files directly into dest_dir
+                self.move_videos_flattened(source_path, &dest_dir)?;
+            }
+        }
+
+        // Compress if enabled
+        if self.config.general.compress_episodes {
+            self.compress_directory_videos(&dest_dir)?;
+        }
+
+        // Remove from torrent client
+        if let Some(client) = self.torrent_client.clone() {
+            if let Some(torrent) = self.torrents.get(self.move_dialog.torrent_idx) {
+                let hash = torrent.hash.clone();
+                let name = torrent.name.clone();
+                let tx = self.msg_tx.clone();
+                tokio::spawn(async move {
+                    info!("Removing moved batch torrent from client: {}", name);
+                    if let Err(e) = client.remove(&hash, false).await {
+                        let _ = tx.send(AppMessage::TorrentError(e.to_string()));
+                    }
+                });
+            }
+        }
+
+        // Clean up empty source directory
+        if source_path.is_dir() {
+            let _ = std::fs::remove_dir_all(source_path);
+        }
+
+        // Refresh library
+        self.refresh_library()?;
+        self.view = View::Downloads;
+
+        Ok(())
+    }
+
+    /// Move directory contents preserving structure
+    fn move_directory_contents(&self, src: &Path, dest: &Path) -> Result<()> {
+        self.walk_and_move_recursive(src, dest, src, true)?;
+        Ok(())
+    }
+
+    /// Move all videos flattened into a single directory
+    fn move_videos_flattened(&self, src: &Path, dest: &Path) -> Result<()> {
+        self.walk_and_move_recursive(src, dest, src, false)?;
+        Ok(())
+    }
+
+    /// Recursive helper for moving files
+    fn walk_and_move_recursive(&self, current: &Path, dest: &Path, root: &Path, preserve_structure: bool) -> Result<()> {
+        let entries = std::fs::read_dir(current)?;
+        
+        for entry in entries.filter_map(|e| e.ok()) {
+            let entry_path = entry.path();
+            
+            if entry_path.is_dir() {
+                // Recurse into subdirectory
+                self.walk_and_move_recursive(&entry_path, dest, root, preserve_structure)?;
+            } else if entry_path.is_file() {
+                let filename = entry_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                
+                if crate::library::parser::is_video_file(&filename) {
+                    let dest_path = if preserve_structure {
+                        // Keep relative path structure
+                        let relative = entry_path.strip_prefix(root).unwrap_or(&entry_path);
+                        let full_dest = dest.join(relative);
+                        if let Some(parent) = full_dest.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        full_dest
+                    } else {
+                        // Flatten - all to dest root, handle conflicts
+                        let base_path = dest.join(&filename);
+                        if base_path.exists() {
+                            let stem = Path::new(&filename).file_stem().unwrap_or_default().to_string_lossy();
+                            let ext = Path::new(&filename).extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+                            let mut counter = 1;
+                            loop {
+                                let new_name = format!("{}_{}.{}", stem, counter, ext);
+                                let new_path = dest.join(&new_name);
+                                if !new_path.exists() {
+                                    break new_path;
+                                }
+                                counter += 1;
+                            }
+                        } else {
+                            base_path
+                        }
+                    };
+
+                    // Move the file
+                    if std::fs::rename(&entry_path, &dest_path).is_err() {
+                        std::fs::copy(&entry_path, &dest_path)?;
+                        std::fs::remove_file(&entry_path)?;
+                    }
+                    info!("Moved: {} -> {}", entry_path.display(), dest_path.display());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Compress all video files in a directory (recursively)
+    fn compress_directory_videos(&self, dir: &Path) -> Result<()> {
+        self.compress_videos_recursive(dir)?;
+        Ok(())
+    }
+
+    fn compress_videos_recursive(&self, dir: &Path) -> Result<()> {
+        let entries = std::fs::read_dir(dir)?;
+        
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            
+            if path.is_dir() {
+                self.compress_videos_recursive(&path)?;
+            } else if path.is_file() {
+                let filename = path.to_string_lossy();
+                if crate::library::parser::is_video_file(&filename) && !filename.ends_with(".zst") {
+                    info!(path = %path.display(), "Compressing episode");
+                    compression::compress_file(&path, self.config.general.compression_level)?;
+                }
+            }
+        }
         Ok(())
     }
     fn render_tracking_dialog(&self, frame: &mut Frame) {
