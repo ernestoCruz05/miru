@@ -1,16 +1,15 @@
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{List, ListItem, ListState},
-    Frame,
 };
 
-use crate::library::{models::Episode, Show};
+use crate::library::{Show, models::Episode};
 
 use super::widgets::{format_episode_num, titled_block};
 
-/// Render an episode item
 fn episode_list_item(ep: &Episode, indent: &str) -> ListItem<'static> {
     let status_icon = if ep.watched { "✓" } else { "○" };
     let status_color = if ep.watched {
@@ -31,7 +30,6 @@ fn episode_list_item(ep: &Episode, indent: &str) -> ListItem<'static> {
         Span::raw(ep.filename.clone()),
     ];
 
-    // Show resume indicator if there's a saved position
     if ep.last_position > 0 && !ep.watched {
         let mins = ep.last_position / 60;
         let secs = ep.last_position % 60;
@@ -54,9 +52,7 @@ pub fn render_episodes_view(
     let mut items: Vec<ListItem> = Vec::new();
 
     if show.is_seasonal() {
-        // Render seasons with their episodes
         for season in &show.seasons {
-            // Season header
             let watched = season.episodes.iter().filter(|e| e.watched).count();
             let total = season.episodes.len();
             let progress_color = if watched == total && total > 0 {
@@ -70,7 +66,9 @@ pub fn render_episodes_view(
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("▸ Season {} ", season.number),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("({}/{})", watched, total),
@@ -78,18 +76,18 @@ pub fn render_episodes_view(
                 ),
             ])));
 
-            // Season episodes (indented)
             for ep in &season.episodes {
                 items.push(episode_list_item(ep, "  "));
             }
         }
 
-        // Render specials if present
         if !show.specials.is_empty() {
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(
                     "▸ Specials ",
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("({})", show.specials.len()),
@@ -102,12 +100,13 @@ pub fn render_episodes_view(
             }
         }
 
-        // Also show loose episodes if any
         if !show.episodes.is_empty() {
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(
                     "▸ Episodes ",
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("({})", show.episodes.len()),
@@ -120,7 +119,6 @@ pub fn render_episodes_view(
             }
         }
     } else {
-        // Flat episode list (traditional non-seasonal show)
         for ep in &show.episodes {
             items.push(episode_list_item(ep, ""));
         }

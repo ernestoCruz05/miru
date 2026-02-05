@@ -21,7 +21,7 @@ use crate::library::{Library, tracking::{self, UpdateResult}};
 use crate::nyaa::{NyaaCategory, NyaaClient, NyaaFilter, NyaaResult, NyaaSort};
 use crate::player::ExternalPlayer;
 use crate::rpc::DiscordRpc;
-use crate::library::models::TrackedSeries; // Add import
+use crate::library::models::TrackedSeries;
 use crate::torrent::{AnyTorrentClient, QBittorrentClient, TransmissionClient, TorrentStatus};
 use crate::ui::{
     render_downloads_view, render_episodes_view, render_library_view, render_search_view, widgets,
@@ -34,7 +34,6 @@ const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "webm", "m4v", "mov", "
 fn clean_filename(name: &str) -> String {
     let mut clean = name.to_string();
     
-    // Remove common patterns
     // Remove [...] bracketed content (subgroup, hash, quality info)
     while let (Some(start), Some(end)) = (clean.find('['), clean.find(']')) {
         if start < end {
@@ -44,7 +43,7 @@ fn clean_filename(name: &str) -> String {
         }
     }
     
-    // Remove (...) parenthetical content
+    // Remove (...) parenthetical content (resolution, codec info)
     while let (Some(start), Some(end)) = (clean.find('('), clean.find(')')) {
         if start < end {
             clean = format!("{}{}", &clean[..start], &clean[end + 1..]);
@@ -53,11 +52,9 @@ fn clean_filename(name: &str) -> String {
         }
     }
     
-    // Clean up multiple spaces and dots
     clean = clean.replace("  ", " ").replace("..", ".").trim().to_string();
     
-    // Try to extract episode number and format nicely
-    // Look for patterns like "- 01", "E01", "EP01", "Episode 01"
+    // Try to extract episode number from common patterns
     let episode_patterns = [
         (regex::Regex::new(r"[Ss](\d{1,2})[Ee](\d{1,3})").unwrap(), true),  // S01E01
         (regex::Regex::new(r"[Ee][Pp]?\.?\s*(\d{1,3})").unwrap(), false),   // E01, EP01, Ep 01
@@ -70,12 +67,9 @@ fn clean_filename(name: &str) -> String {
             if *has_season {
                 let season: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(1);
                 let episode: u32 = caps.get(2).unwrap().as_str().parse().unwrap_or(1);
-                // Get the show name (everything before the match)
                 let show_name = clean[..caps.get(0).unwrap().start()].trim();
                 let show_name = show_name.trim_end_matches(&['-', '.', ' '][..]);
-                // Sanitize: replace chars invalid in filenames (/ and \)
                 let show_name = show_name.replace('/', "-").replace('\\', "-");
-                // Extract extension - validate it's a known video extension
                 let ext = Path::new(name).extension()
                     .and_then(|e| e.to_str())
                     .filter(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
@@ -85,9 +79,7 @@ fn clean_filename(name: &str) -> String {
                 let episode: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(1);
                 let show_name = clean[..caps.get(0).unwrap().start()].trim();
                 let show_name = show_name.trim_end_matches(&['-', '.', ' '][..]);
-                // Sanitize: replace chars invalid in filenames (/ and \)
                 let show_name = show_name.replace('/', "-").replace('\\', "-");
-                // Extract extension - validate it's a known video extension
                 let ext = Path::new(name).extension()
                     .and_then(|e| e.to_str())
                     .filter(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
@@ -96,12 +88,23 @@ fn clean_filename(name: &str) -> String {
             }
         }
     }
+    let clean_name = clean.replace('/', "-").replace('\\', "-").trim().to_string();
+    let ext = Path::new(name).extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()));
     
-    // If no pattern matched, just return cleaned name (also sanitized)
-    clean.replace('/', "-").replace('\\', "-").trim().to_string()
+    match ext {
+        Some(e) => {
+            if clean_name.to_lowercase().ends_with(&format!(".{}", e.to_lowercase())) {
+                clean_name
+            } else {
+                format!("{}.{}", clean_name, e)
+            }
+        }
+        None => clean_name,
+    }
 }
 
-/// List subdirectories in a path (for show folders)
 fn list_subdirs(path: &Path) -> Vec<String> {
     std::fs::read_dir(path)
         .map(|entries| {
@@ -115,7 +118,6 @@ fn list_subdirs(path: &Path) -> Vec<String> {
 }
 
 fn find_video_in_dir(dir: &Path) -> Result<PathBuf> {
-    // First, try to find video files directly in the directory
     if let Ok(entries) = std::fs::read_dir(dir) {
         let mut videos: Vec<_> = entries
             .filter_map(|e| e.ok())
@@ -136,7 +138,6 @@ fn find_video_in_dir(dir: &Path) -> Result<PathBuf> {
         }
     }
 
-    // If no video found, return error
     Err(crate::error::Error::Io(std::io::Error::new(
         std::io::ErrorKind::NotFound,
         format!("No video file found in {:?}", dir),
@@ -184,21 +185,19 @@ pub enum View {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeleteTarget {
-    Show(usize), // Show index
-    Episode(usize, usize), // Show index, Episode index
+    Show(usize), 
+    Episode(usize, usize), 
 }
 
 pub struct DeleteDialogState {
     pub target: DeleteTarget,
     pub name: String,
-    // We intentionally don't store path here to avoid duplication/desync. 
-    // We resolve path at deletion time.
 }
 
 impl Default for DeleteDialogState {
     fn default() -> Self {
         Self {
-            target: DeleteTarget::Show(0), // Dummy default
+            target: DeleteTarget::Show(0), 
             name: String::new(),
         }
     }
@@ -208,18 +207,13 @@ impl Default for DeleteDialogState {
 pub enum MoveDialogStep {
     SelectMediaDir,
     SelectShow,
-    /// Preview batch structure and choose strategy (only for batches)
     BatchPreview,
     EditFilename,
 }
-
-/// Strategy for moving batch downloads
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BatchMoveStrategy {
-    /// Preserve the original folder structure (Season 1/, OVAs/, etc.)
     #[default]
     PreserveStructure,
-    /// Flatten all episodes into a single folder
     Flatten,
 }
 
@@ -239,7 +233,6 @@ impl BatchMoveStrategy {
     }
 }
 
-/// State for the move-to-library dialog
 pub struct MoveDialogState {
     pub step: MoveDialogStep,
     pub torrent_idx: usize,
@@ -253,9 +246,7 @@ pub struct MoveDialogState {
     pub creating_new: bool,
     pub filename: String,
     pub original_path: PathBuf,
-    /// Batch analysis results (if source is a batch folder)
     pub batch_analysis: Option<crate::library::batch::BatchAnalysis>,
-    /// Selected strategy for batch moves
     pub batch_strategy: BatchMoveStrategy,
 }
 
@@ -280,14 +271,13 @@ impl Default for MoveDialogState {
     }
 }
 
-/// Messages sent from async tasks back to the main app
 pub enum AppMessage {
     SearchResults(Vec<NyaaResult>),
     SearchError(String),
     TorrentAdded(String),
     TorrentError(String),
-    MetadataFound(String, crate::metadata::AnimeMetadata), // Show ID, Metadata
-    CoverUpdated(String), // Show ID (cover downloaded)
+    MetadataFound(String, crate::metadata::AnimeMetadata),
+    CoverUpdated(String),
     MetadataError(String),
     TorrentList(Vec<TorrentStatus>),
     UpdatesFound(Vec<UpdateResult>),
@@ -301,16 +291,14 @@ pub struct App {
     pub previous_view: View,
     pub accent: Color,
 
-    // Library view state
     pub library_state: ListState,
     pub tracking_list_state: ListState,
     pub episodes_state: ListState,
     pub selected_show_idx: Option<usize>,
 
-    // Search view state
     pub search_query: String,
     pub search_results: Vec<NyaaResult>,
-    pub filtered_search_results: Vec<usize>, // Indices of filtered results
+    pub filtered_search_results: Vec<usize>,
     pub search_filter_input: String,
     pub is_filtering: bool,
     pub search_state: ListState,
@@ -319,20 +307,16 @@ pub struct App {
     pub search_filter: NyaaFilter,
     pub search_sort: NyaaSort,
 
-    // Downloads view state
     pub torrents: Vec<TorrentStatus>,
     pub downloads_state: ListState,
 
-    // Move dialog state
     pub move_dialog: MoveDialogState,
     pub tracking_state: TrackingDialogState,
-    pub delete_dialog_state: DeleteDialogState, // New field
+    pub delete_dialog_state: DeleteDialogState, 
 
-    // Async communication
     pub msg_tx: mpsc::UnboundedSender<AppMessage>,
     pub msg_rx: mpsc::UnboundedReceiver<AppMessage>,
 
-    // Clients
     pub nyaa_client: Arc<NyaaClient>,
     pub torrent_client: Option<Arc<AnyTorrentClient>>,
     pub metadata_provider: Option<Arc<dyn crate::metadata::MetadataProvider + Send + Sync>>,
@@ -354,7 +338,6 @@ impl App {
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
 
-        // Initialize torrent client based on config
         let torrent_client = create_torrent_client(&config);
 
         let metadata_provider: Option<Arc<dyn crate::metadata::MetadataProvider + Send + Sync>> =
@@ -366,11 +349,6 @@ impl App {
         
         let image_cache = Arc::new(crate::image_cache::ImageCache::new().unwrap_or_else(|e| {
             tracing::error!("Failed to initialize image cache: {}", e);
-            // Fallback (maybe should be fatal? No, just no cache)
-             // We need to construct a valid object tho?
-             // Since ImageCache::new returns Result, let's panic if we can't create cache dir?
-             // Or better, handle it gracefully?
-             // For now, let's panic or unwrap as config dir should exist.
              panic!("Failed to initialize image cache: {}", e);
         }));
 
@@ -420,12 +398,8 @@ impl App {
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        // Start periodic torrent list refresh
         self.refresh_torrent_list();
         
-        // Check for updates happens after torrent list is loaded
-
-        // Launch managed daemon if configured
         self.spawn_managed_daemon();
 
         while self.running {
@@ -444,7 +418,6 @@ impl App {
                 AppMessage::SearchResults(results) => {
                     self.search_loading = false;
                     self.search_results = results;
-                    // Initialize filtered results with everything
                     self.filtered_search_results = (0..self.search_results.len()).collect();
                     if !self.filtered_search_results.is_empty() {
                         self.search_state.select(Some(0));
@@ -465,7 +438,6 @@ impl App {
                     if let Some(show) = self.library.shows.iter_mut().find(|s| s.id == show_id) {
                         info!("Updated metadata for: {}", show.title);
                         
-                        // Trigger cover download if URL exists
                         if let Some(url) = metadata.cover_url.clone() {
                             let cache = self.image_cache.clone();
                             let tx = self.msg_tx.clone();
@@ -485,7 +457,6 @@ impl App {
                 }
                 AppMessage::CoverUpdated(show_id) => {
                      info!("Cover image updated for show: {}", show_id);
-                     // Implicitly redraw on next tick
                 }
                 AppMessage::MetadataError(e) => {
                     error!("Metadata fetch failed: {}", e);
@@ -496,8 +467,6 @@ impl App {
                         self.downloads_state.select(Some(0));
                     }
                     
-                    // Trigger tracking update scan only once we have the torrent list
-                    // This prevents re-adding existing torrents
                     if !self.startup_scan_completed {
                         self.startup_scan_completed = true;
                         self.check_for_updates();
@@ -505,7 +474,6 @@ impl App {
                 }
                 AppMessage::UpdatesFound(updates) => {
                     for update in updates {
-                        // Skip if already in active torrents (prevents race condition with move dialog)
                         let already_active = self.torrents.iter().any(|t| {
                             t.name.to_lowercase() == update.title.to_lowercase()
                         });
@@ -516,14 +484,7 @@ impl App {
                         
                         if let Some(client) = &self.torrent_client {
                            info!("Auto-downloading: {} - {}", update.series_title, update.title);
-                           // Async adding of magnets?
-                           // We can't await here easily as process_messages is sync (or should be async?)
-                           // Actually process_messages is Sync. 
-                           // But AnyTorrentClient needs async usually?
-                           // Wait, AnyTorrentClient in src/torrent/mod.rs: 
-                           // pub async fn add_magnet(...)
-                           // So we need to spawn a task.
-                           let client = client.clone(); // Arc
+                           let client = client.clone();
                            let magnet = update.magnet.clone();
                            let tx = self.msg_tx.clone();
                            tokio::spawn(async move {
@@ -621,7 +582,6 @@ impl App {
                 frame.render_widget(help, help_area);
             }
             View::MoveDialog => {
-                // Render downloads in background
                 render_downloads_view(
                     frame,
                     main_area,
@@ -630,7 +590,6 @@ impl App {
                     self.accent,
                 );
 
-                // Render move dialog overlay
                 self.render_move_dialog(frame);
 
                 let help_text = match self.move_dialog.step {
@@ -643,7 +602,6 @@ impl App {
                 frame.render_widget(help, help_area);
             }
             View::TrackingDialog => {
-                // Render library in background
                 render_library_view(
                     frame,
                     main_area,
@@ -653,7 +611,6 @@ impl App {
                     &self.image_cache,
                     &mut self.picker,
                 );
-                // Render dialog overlay
                 self.render_tracking_dialog(frame);
                 
                 let help = widgets::help_bar(&[
@@ -690,7 +647,6 @@ impl App {
                 frame.render_widget(help, help_area);
             }
             View::Help => {
-                // Render previous view as background
                 match self.previous_view {
                     View::Library => render_library_view(frame, main_area, &self.library.shows, &mut self.library_state, self.accent, &self.image_cache, &mut self.picker),
                     View::Episodes => {
@@ -703,7 +659,7 @@ impl App {
                     View::Search => render_search_view(frame, main_area, &self.search_query, &self.search_results, &mut self.search_state, self.search_loading, self.search_category, self.search_filter, self.search_sort, self.accent),
                     View::Downloads => render_downloads_view(frame, main_area, &self.torrents, &mut self.downloads_state, self.accent),
                     View::TrackingList => self.render_tracking_list(frame, main_area),
-                    _ => {} // Don't render background for dialogs if active (usually help is global, but dialogs have their own help)
+                    _ => {}
                 }
                 self.render_help(frame);
             }
@@ -716,7 +672,6 @@ impl App {
                 if key.kind != KeyEventKind::Press {
                     return Ok(());
                 }
-                // Global quit with Ctrl+C
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
                 {
                     self.running = false;
@@ -781,7 +736,6 @@ impl App {
                                 }
                             });
                         } else {
-                            // Notify user? For now just log
                             error!("No metadata provider configured (check mal_client_id)");
                         }
                     }
@@ -885,11 +839,9 @@ impl App {
                     self.running = false;
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Cycle category
                     self.search_category = self.search_category.next();
                 }
                 KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Cycle filter
                     self.search_filter = self.search_filter.next();
                 }
                 KeyCode::Tab | KeyCode::Down => {
@@ -901,14 +853,11 @@ impl App {
                     self.move_selection_up(&View::Search);
                 }
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Cycle sort
                     self.search_sort = self.search_sort.next();
-                    // If results exist, re-search with new sort to respect server-side ordering
                     if !self.search_results.is_empty() {
                         self.perform_search();
                     }
                 }
-                // Enter filter mode with /
                 KeyCode::Char('/') if !self.search_results.is_empty() => {
                     self.is_filtering = true;
                     self.search_filter_input.clear();
@@ -919,10 +868,8 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if self.search_results.is_empty() {
-                        // Perform search
                         self.perform_search();
                     } else {
-                        // Download selected torrent
                         self.download_selected_torrent();
                     }
                 }
@@ -1093,7 +1040,6 @@ impl App {
         let show_title = show.title.clone();
         let episode_number = episode.number;
 
-        // Check if file is compressed and decompress to temp if needed
         let (play_path, temp_path) = if compression::is_compressed(&path) {
             info!(path = %path.display(), "Decompressing episode for playback");
             let temp = compression::decompress_to_temp(&path)?;
@@ -1104,18 +1050,14 @@ impl App {
 
         let player_cmd = self.config.general.player.clone();
         
-        // Select logic for args based on player name (fallback to mpv args if exact match not found for vlc)
-        // Check if user has specific config for this player
         let args = if player_cmd == "vlc" {
              self.config.player.vlc.as_ref().map(|p| p.args.clone()).unwrap_or_else(|| vec!["--fullscreen".to_string()])
         } else {
-             // Default to mpv args or empty if unknown
              self.config.player.mpv.args.clone()
         };
 
         let mut player = ExternalPlayer::new(player_cmd, args);
 
-        // RPC: Set activity
         if let Some(rpc) = &mut self.rpc {
             let details = format!("Watching {} on miru", show_title);
             let state = format!("Episode {}", episode_number);
@@ -1125,12 +1067,9 @@ impl App {
         player.play(&play_path, start_pos)?;
         player.wait()?;
 
-        // RPC: Clear activity
         if let Some(rpc) = &mut self.rpc {
             rpc.clear();
         }
-
-        // Clean up temp file if we decompressed
         if let Some(temp) = temp_path {
             if let Some(parent) = temp.parent() {
                 let _ = std::fs::remove_dir_all(parent);
@@ -1148,7 +1087,6 @@ impl App {
             return Ok(());
         };
 
-        // Scope to borrow show/episode
         let (show_id, show_title, episode_number, path, start_pos) = {
             let show = &self.library.shows[show_idx];
             let Some(episode) = show.next_unwatched() else {
@@ -1164,7 +1102,6 @@ impl App {
             (show.id.clone(), show.title.clone(), episode.number, path, start_pos)
         };
 
-        // Check if file is compressed and decompress to temp if needed
         let (play_path, temp_path) = if compression::is_compressed(&path) {
             info!(path = %path.display(), "Decompressing episode for playback");
             let temp = compression::decompress_to_temp(&path)?;
@@ -1175,18 +1112,14 @@ impl App {
 
         let player_cmd = self.config.general.player.clone();
         
-        // Select logic for args based on player name (fallback to mpv args if exact match not found for vlc)
-        // Check if user has specific config for this player
         let args = if player_cmd == "vlc" {
              self.config.player.vlc.as_ref().map(|p| p.args.clone()).unwrap_or_else(|| vec!["--fullscreen".to_string()])
         } else {
-             // Default to mpv args or empty if unknown
              self.config.player.mpv.args.clone()
         };
 
         let mut player = ExternalPlayer::new(player_cmd, args);
 
-        // RPC: Set activity
         if let Some(rpc) = &mut self.rpc {
             let details = format!("Watching {} on Miru", show_title);
             let state = format!("Episode {}", episode_number);
@@ -1196,12 +1129,9 @@ impl App {
         player.play(&play_path, start_pos)?;
         player.wait()?;
 
-        // RPC: Clear activity
         if let Some(rpc) = &mut self.rpc {
             rpc.clear();
         }
-
-        // Clean up temp file if we decompressed
         if let Some(temp) = temp_path {
             if let Some(parent) = temp.parent() {
                 let _ = std::fs::remove_dir_all(parent);
@@ -1219,7 +1149,6 @@ impl App {
             return;
         };
         
-        // Map filtered index to real index if filtering
         let result_idx = if !self.filtered_search_results.is_empty() {
             *self.filtered_search_results.get(idx).unwrap_or(&idx)
         } else {
@@ -1247,7 +1176,6 @@ impl App {
                 }
             });
             
-            // Switch to downloads view to see progress
             self.view = View::Downloads;
         }
     }
@@ -1260,7 +1188,6 @@ impl App {
             return Ok(());
         };
 
-        // Only play if download is complete
         if torrent.progress < 1.0 {
             debug!("Torrent not complete, cannot play");
             return Ok(());
@@ -1268,11 +1195,9 @@ impl App {
 
         let content_path = std::path::Path::new(&torrent.content_path);
         
-        // Find a playable video file
         let video_path = if content_path.is_file() {
             content_path.to_path_buf()
         } else if content_path.is_dir() {
-            // Look for video files in the directory
             find_video_in_dir(content_path)?
         } else {
             debug!("Content path doesn't exist: {:?}", content_path);
@@ -1283,7 +1208,6 @@ impl App {
          let args = if player_cmd == "vlc" {
              self.config.player.vlc.as_ref().map(|p| p.args.clone()).unwrap_or_else(|| vec!["--fullscreen".to_string()])
         } else {
-             // Default to mpv args or empty if unknown
              self.config.player.mpv.args.clone()
         };
 
@@ -1455,7 +1379,6 @@ impl App {
             error!("Content path reported by torrent client does NOT exist: {}", original_path.display());
         }
 
-        // Analyze if this is a batch download
         let batch_analysis = if original_path.is_dir() {
             let analysis = crate::library::batch::analyze_batch(&original_path);
             if analysis.is_batch {
@@ -1572,8 +1495,7 @@ impl App {
     }
 
     fn check_for_updates(&self) { 
-        // Helper to spawn update task
-        let library = self.library.clone(); // necessary for thread safety sadly, dont want to run into race conditions
+        let library = self.library.clone();
         let client = self.nyaa_client.clone();
         let tx = self.msg_tx.clone();
         
@@ -1617,7 +1539,6 @@ impl App {
                             if let Some(dir) = self.move_dialog.media_dirs.get(idx).cloned() {
                                 self.move_dialog.selected_media_dir = Some(dir.clone());
                                 
-                                // Load shows in this directory
                                 let mut shows = list_subdirs(&dir);
                                 shows.sort();
                                 self.move_dialog.shows_in_dir = shows;
@@ -1636,7 +1557,6 @@ impl App {
             }
             MoveDialogStep::SelectShow => {
                 if self.move_dialog.creating_new {
-                    // Text input mode for new folder name
                     match key {
                         KeyCode::Esc => {
                             self.move_dialog.creating_new = false;
@@ -1646,7 +1566,6 @@ impl App {
                             if !self.move_dialog.new_show_name.is_empty() {
                                 self.move_dialog.selected_show = Some(self.move_dialog.new_show_name.clone());
                                 self.move_dialog.creating_new = false;
-                                // Route to BatchPreview if this is a batch, otherwise to EditFilename
                                 if self.move_dialog.batch_analysis.is_some() {
                                     self.move_dialog.step = MoveDialogStep::BatchPreview;
                                 } else {
@@ -1658,7 +1577,9 @@ impl App {
                             self.move_dialog.new_show_name.pop();
                         }
                         KeyCode::Char(c) => {
-                            self.move_dialog.new_show_name.push(c);
+                            if c != '/' && c != '\\' {
+                                self.move_dialog.new_show_name.push(c);
+                            }
                         }
                         _ => {}
                     }
@@ -1690,7 +1611,6 @@ impl App {
                             if let Some(idx) = self.move_dialog.show_state.selected() {
                                 if let Some(show) = self.move_dialog.shows_in_dir.get(idx).cloned() {
                                     self.move_dialog.selected_show = Some(show);
-                                    // Route to BatchPreview if this is a batch, otherwise to EditFilename
                                     if self.move_dialog.batch_analysis.is_some() {
                                         self.move_dialog.step = MoveDialogStep::BatchPreview;
                                     } else {
@@ -1709,11 +1629,9 @@ impl App {
                         self.move_dialog.step = MoveDialogStep::SelectShow;
                     }
                     KeyCode::Tab | KeyCode::Char('s') => {
-                        // Toggle strategy
                         self.move_dialog.batch_strategy = self.move_dialog.batch_strategy.next();
                     }
                     KeyCode::Enter => {
-                        // Execute batch move
                         if let Err(e) = self.execute_batch_move() {
                             error!("Failed to move batch: {}. Source may have been deleted or is in use.", e);
                         }
@@ -1729,7 +1647,6 @@ impl App {
                     KeyCode::Enter => {
                         if let Err(e) = self.execute_move() {
                             error!("Failed to move file: {}. Source may have been deleted or is in use.", e);
-                            // Stay in dialog so user can cancel with Esc
                         }
                     }
                     KeyCode::Backspace => {
@@ -1755,7 +1672,6 @@ impl App {
 
         let area = frame.area();
         
-        // Larger dialog for batch preview
         let is_batch_preview = self.move_dialog.step == MoveDialogStep::BatchPreview;
         let dialog_width = if is_batch_preview { 70 } else { 60 }.min(area.width.saturating_sub(4));
         let dialog_height = if is_batch_preview { 20 } else { 15 }.min(area.height.saturating_sub(4));
@@ -1844,7 +1760,6 @@ impl App {
                     ]),
                 ];
 
-                // Show batch analysis summary
                 if let Some(ref analysis) = self.move_dialog.batch_analysis {
                     lines.push(Line::from(vec![
                         Span::styled("Contents: ", Style::default().fg(Color::DarkGray)),
@@ -1852,7 +1767,6 @@ impl App {
                     ]));
                     lines.push(Line::from(""));
 
-                    // Show season breakdown
                     if !analysis.seasons.is_empty() {
                         lines.push(Line::from(vec![
                             Span::styled("Seasons:", Style::default().fg(Color::Cyan)),
@@ -1933,7 +1847,6 @@ impl App {
 
         let dest_dir = media_dir.join(show_name);
         
-        // Create directory if it doesn't exist
         if !dest_dir.exists() {
             std::fs::create_dir_all(&dest_dir)?;
         }
@@ -1960,7 +1873,6 @@ impl App {
 
         if !real_source_path.exists() {
              error!("CRITICAL: Source file DOES NOT EXIST at moment of move: {}", real_source_path.display());
-             // List parent directory to see what IS there
              if let Some(parent) = real_source_path.parent() {
                  if let Ok(entries) = std::fs::read_dir(parent) {
                      let file_list: Vec<String> = entries
@@ -1973,7 +1885,6 @@ impl App {
              }
         } else {
             info!("Source file CONFIRMED exists: {}", real_source_path.display());
-            // Check permissions/metadata just in case
             if let Ok(meta) = std::fs::metadata(&real_source_path) {
                 info!("Source metadata: is_file={}, len={}, permissions={:?}", meta.is_file(), meta.len(), meta.permissions());
             }
@@ -1985,30 +1896,22 @@ impl App {
             "Moving file"
         );
 
-        // Try rename first (same filesystem), fall back to copy+delete
         if std::fs::rename(&real_source_path, &dest_path).is_err() {
             std::fs::copy(&real_source_path, &dest_path)?;
             std::fs::remove_file(&real_source_path)?;
         }
-
-        // Compress if enabled
         if self.config.general.compress_episodes {
             info!(path = %dest_path.display(), "Compressing episode");
             compression::compress_file(&dest_path, self.config.general.compression_level)?;
         }
 
-        // Remove from torrent client
         if let Some(client) = self.torrent_client.clone() {
-             // We use the index from when the dialog was opened. 
-             // Ideally we should have stored the hash in MoveDialogState to be safe against list updates.
-             // But for now, assuming list hasn't shifted significantly (since we block UI interaction with dialog).
              if let Some(torrent) = self.torrents.get(self.move_dialog.torrent_idx) {
                   let hash = torrent.hash.clone();
                   let name = torrent.name.clone();
                   let tx = self.msg_tx.clone();
                   tokio::spawn(async move {
                       info!("Removing moved torrent from client: {}", name);
-                      // delete_files=false because we already moved/renamed the files on disk
                       if let Err(e) = client.remove(&hash, false).await {
                            let _ = tx.send(AppMessage::TorrentError(e.to_string()));
                       }
@@ -2016,16 +1919,13 @@ impl App {
              }
         }
 
-        // Refresh library to pick up the new file
         self.refresh_library()?;
 
-        // Go back to downloads view
         self.view = View::Downloads;
 
         Ok(())
     }
 
-    /// Execute a batch move (moving an entire folder structure)
     fn execute_batch_move(&mut self) -> Result<()> {
         let Some(media_dir) = &self.move_dialog.selected_media_dir else {
             return Ok(());
@@ -2037,7 +1937,6 @@ impl App {
         let dest_dir = media_dir.join(show_name);
         let source_path = &self.move_dialog.original_path;
 
-        // Create destination directory if it doesn't exist
         if !dest_dir.exists() {
             std::fs::create_dir_all(&dest_dir)?;
         }
@@ -2051,21 +1950,16 @@ impl App {
 
         match self.move_dialog.batch_strategy {
             BatchMoveStrategy::PreserveStructure => {
-                // Move the entire folder structure, preserving subdirectories
                 self.move_directory_contents(source_path, &dest_dir)?;
             }
             BatchMoveStrategy::Flatten => {
-                // Flatten: move all video files directly into dest_dir
                 self.move_videos_flattened(source_path, &dest_dir)?;
             }
         }
 
-        // Compress if enabled
         if self.config.general.compress_episodes {
             self.compress_directory_videos(&dest_dir)?;
         }
-
-        // Remove from torrent client
         if let Some(client) = self.torrent_client.clone() {
             if let Some(torrent) = self.torrents.get(self.move_dialog.torrent_idx) {
                 let hash = torrent.hash.clone();
@@ -2080,31 +1974,23 @@ impl App {
             }
         }
 
-        // Clean up empty source directory
         if source_path.is_dir() {
             let _ = std::fs::remove_dir_all(source_path);
         }
-
-        // Refresh library
         self.refresh_library()?;
         self.view = View::Downloads;
 
         Ok(())
     }
 
-    /// Move directory contents preserving structure
     fn move_directory_contents(&self, src: &Path, dest: &Path) -> Result<()> {
         self.walk_and_move_recursive(src, dest, src, true)?;
         Ok(())
     }
-
-    /// Move all videos flattened into a single directory
     fn move_videos_flattened(&self, src: &Path, dest: &Path) -> Result<()> {
         self.walk_and_move_recursive(src, dest, src, false)?;
         Ok(())
     }
-
-    /// Recursive helper for moving files
     fn walk_and_move_recursive(&self, current: &Path, dest: &Path, root: &Path, preserve_structure: bool) -> Result<()> {
         let entries = std::fs::read_dir(current)?;
         
@@ -2112,14 +1998,12 @@ impl App {
             let entry_path = entry.path();
             
             if entry_path.is_dir() {
-                // Recurse into subdirectory
                 self.walk_and_move_recursive(&entry_path, dest, root, preserve_structure)?;
             } else if entry_path.is_file() {
                 let filename = entry_path.file_name().unwrap_or_default().to_string_lossy().to_string();
                 
                 if crate::library::parser::is_video_file(&filename) {
                     let dest_path = if preserve_structure {
-                        // Keep relative path structure
                         let relative = entry_path.strip_prefix(root).unwrap_or(&entry_path);
                         let full_dest = dest.join(relative);
                         if let Some(parent) = full_dest.parent() {
@@ -2127,7 +2011,6 @@ impl App {
                         }
                         full_dest
                     } else {
-                        // Flatten - all to dest root, handle conflicts
                         let base_path = dest.join(&filename);
                         if base_path.exists() {
                             let stem = Path::new(&filename).file_stem().unwrap_or_default().to_string_lossy();
@@ -2146,7 +2029,6 @@ impl App {
                         }
                     };
 
-                    // Move the file
                     if std::fs::rename(&entry_path, &dest_path).is_err() {
                         std::fs::copy(&entry_path, &dest_path)?;
                         std::fs::remove_file(&entry_path)?;
@@ -2158,7 +2040,6 @@ impl App {
         Ok(())
     }
 
-    /// Compress all video files in a directory (recursively)
     fn compress_directory_videos(&self, dir: &Path) -> Result<()> {
         self.compress_videos_recursive(dir)?;
         Ok(())
@@ -2226,7 +2107,6 @@ impl App {
             layout[1]
         );
         
-        // Show current filters
         if !self.tracking_state.input_group.is_empty() || !self.tracking_state.input_quality.is_empty() {
              let summary = format!("Group: {}, Quality: {}", 
                 if self.tracking_state.input_group.is_empty() { "Any" } else { &self.tracking_state.input_group },
@@ -2245,11 +2125,9 @@ impl App {
                 command.args(args);
             }
 
-            // Suppress output
             command.stdout(std::process::Stdio::null());
             command.stderr(std::process::Stdio::null());
 
-            // Spawn and track
             match command.spawn() {
                 Ok(child) => {
                     info!("Daemon launched successfully (PID: {})", child.id());
@@ -2264,7 +2142,6 @@ impl App {
         if let Some(mut child) = self.managed_daemon_handle.take() {
             info!("Stopping managed daemon (PID: {})", child.id());
             
-            // Try SIGTERM first via kill command
             let pid = child.id().to_string();
             let _ = std::process::Command::new("kill")
                 .arg(&pid)
@@ -2303,14 +2180,12 @@ impl App {
     fn handle_delete_dialog_input(&mut self, key: KeyCode) -> Result<()> {
         match key {
             KeyCode::Esc => {
-                // Cancel
                 match self.delete_dialog_state.target {
                     DeleteTarget::Show(_) => self.view = View::Library,
                     DeleteTarget::Episode(_, _) => self.view = View::Episodes,
                 }
             }
             KeyCode::Enter => {
-                // Confirm delete
                 match self.delete_dialog_state.target {
                     DeleteTarget::Show(idx) => {
                         if let Some(show) = self.library.shows.get(idx) {
@@ -2318,10 +2193,6 @@ impl App {
                              if show.path.exists() {
                                  std::fs::remove_dir_all(&show.path)?;
                              }
-                             // Remove from library (tracked shows too?)
-                             // If it's a tracked show, we should probably remove the tracker too.
-                             // But Library struct separates them.
-                             // For now, remove from `shows`. 
                              self.library.shows.remove(idx);
                              self.library.save()?;
                         }
@@ -2337,7 +2208,6 @@ impl App {
                                       std::fs::remove_file(path)?;
                                   }
                                   show.episodes.remove(ep_idx);
-                                  // Update total count? Maybe not necessary as it's optional.
                              }
                              self.library.save()?;
                          }
@@ -2355,7 +2225,7 @@ impl App {
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
         use ratatui::layout::{Alignment, Rect};
         use ratatui::style::{Color, Style, Modifier};
-        use ratatui::text::{Line, Text}; // Changed from Span to Text
+        use ratatui::text::{Line, Text};
 
         let area = frame.area();
         let dialog_area = Rect {
@@ -2375,7 +2245,6 @@ impl App {
         let inner_area = block.inner(dialog_area);
         frame.render_widget(block, dialog_area);
         
-        // Use Text directly or Line
         let text = Text::from(vec![
             Line::from(vec![
                 "Are you sure you want to delete:".into(),
@@ -2558,7 +2427,6 @@ pub fn restore_terminal() -> io::Result<()> {
     Ok(())
 }
 
-/// ASCII art for "miru" - each letter as a frame
 const MIRU_FRAMES: [&str; 4] = [
     r#"
                      
@@ -2604,7 +2472,6 @@ const MIRU_FRAMES: [&str; 4] = [
 
 const MIRU_TAGLINE: &str = "見る - to watch";
 
-/// Play the splash screen animation
 pub fn play_splash(terminal: &mut DefaultTerminal, accent: Color) -> io::Result<()> {
     use ratatui::{
         layout::{Alignment, Rect},
@@ -2613,13 +2480,11 @@ pub fn play_splash(terminal: &mut DefaultTerminal, accent: Color) -> io::Result<
         widgets::Paragraph,
     };
 
-    // Type out each letter
     for frame in &MIRU_FRAMES {
         terminal.draw(|f| {
             let area = f.area();
             let text = Text::styled(*frame, Style::default().fg(accent));
             
-            // Center vertically
             let lines = frame.lines().count() as u16;
             let y_offset = area.height.saturating_sub(lines) / 2;
             
@@ -2637,7 +2502,6 @@ pub fn play_splash(terminal: &mut DefaultTerminal, accent: Color) -> io::Result<
         thread::sleep(Duration::from_millis(150));
     }
 
-    // Show tagline
     terminal.draw(|f| {
         let area = f.area();
         let frame_text = MIRU_FRAMES[3];
@@ -2669,7 +2533,6 @@ pub fn play_splash(terminal: &mut DefaultTerminal, accent: Color) -> io::Result<
 
     thread::sleep(Duration::from_millis(800));
 
-    // Erase animation - delete letters in reverse
     for i in (0..4).rev() {
         terminal.draw(|f| {
             let area = f.area();
@@ -2692,7 +2555,6 @@ pub fn play_splash(terminal: &mut DefaultTerminal, accent: Color) -> io::Result<
         thread::sleep(Duration::from_millis(80));
     }
 
-    // Clear screen
     terminal.draw(|_f| {})?;
     thread::sleep(Duration::from_millis(100));
 

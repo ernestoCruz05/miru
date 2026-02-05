@@ -1,25 +1,24 @@
-mod transmission;
 mod qbittorrent;
+mod transmission;
 
-pub use transmission::TransmissionClient;
 pub use qbittorrent::QBittorrentClient;
+pub use transmission::TransmissionClient;
 
 use crate::error::Result;
 
-/// Status of a torrent download
 #[derive(Debug, Clone)]
 pub struct TorrentStatus {
     pub name: String,
     pub hash: String,
-    pub progress: f64,       // 0.0 to 1.0
-    pub download_rate: u64,  // bytes/sec
-    pub upload_rate: u64,    // bytes/sec
-    pub size: u64,           // total bytes
-    pub downloaded: u64,     // bytes downloaded
+    pub progress: f64,
+    pub download_rate: u64,
+    pub upload_rate: u64,
+    pub size: u64,
+    pub downloaded: u64,
     pub seeders: u32,
     pub state: TorrentState,
-    pub save_path: String,   // directory where torrent is saved
-    pub content_path: String, // full path to content (file or folder)
+    pub save_path: String,
+    pub content_path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,25 +46,23 @@ impl TorrentState {
     }
 }
 
-/// Common interface for torrent clients
 pub trait TorrentClient {
-    /// Add a torrent via magnet link
     fn add_magnet(&self, magnet: &str) -> impl std::future::Future<Output = Result<String>> + Send;
 
-    /// Get status of all torrents
-    fn list_torrents(&self) -> impl std::future::Future<Output = Result<Vec<TorrentStatus>>> + Send;
+    fn list_torrents(&self)
+    -> impl std::future::Future<Output = Result<Vec<TorrentStatus>>> + Send;
 
-    /// Pause a torrent
     fn pause(&self, hash: &str) -> impl std::future::Future<Output = Result<()>> + Send;
 
-    /// Resume a torrent
     fn resume(&self, hash: &str) -> impl std::future::Future<Output = Result<()>> + Send;
 
-    /// Remove a torrent (optionally with data)
-    fn remove(&self, hash: &str, delete_data: bool) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn remove(
+        &self,
+        hash: &str,
+        delete_data: bool,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
-/// Enum to hold any supported torrent client
 #[derive(Clone)]
 pub enum AnyTorrentClient {
     Transmission(TransmissionClient),

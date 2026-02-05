@@ -4,7 +4,6 @@ use tracing::debug;
 use super::{TorrentClient, TorrentState, TorrentStatus};
 use crate::error::{Error, Result};
 
-/// qBittorrent WebUI API client
 #[derive(Clone)]
 pub struct QBittorrentClient {
     client: reqwest::Client,
@@ -23,10 +22,7 @@ impl QBittorrentClient {
             base_url: format!("http://{}:{}", host, port),
         };
 
-        // Store credentials for later login if provided
-        if let (Some(_user), Some(_pass)) = (username, password) {
-            // Login will happen on first API call
-        }
+        if let (Some(_user), Some(_pass)) = (username, password) {}
 
         qb
     }
@@ -42,9 +38,7 @@ impl QBittorrentClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(Error::TorrentClient(
-                "qBittorrent login failed".to_string(),
-            ));
+            return Err(Error::TorrentClient("qBittorrent login failed".to_string()));
         }
 
         let text = response.text().await?;
@@ -93,8 +87,6 @@ impl TorrentClient for QBittorrentClient {
             )));
         }
 
-        // qBittorrent doesn't return the hash directly, extract from magnet
-        // Magnet format: magnet:?xt=urn:btih:<hash>&...
         let hash = magnet
             .split("btih:")
             .nth(1)

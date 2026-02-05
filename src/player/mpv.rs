@@ -13,24 +13,24 @@ pub struct ExternalPlayer {
 
 impl ExternalPlayer {
     pub fn new(command: String, args: Vec<String>) -> Self {
-        Self { command, args, child: None }
+        Self {
+            command,
+            args,
+            child: None,
+        }
     }
 
-    /// Launch player with the given video file
     pub fn play(&mut self, path: &Path, start_position: Option<u64>) -> Result<()> {
         let command = resolve_executable(&self.command);
         let mut cmd = Command::new(&command);
 
-        // Suppress output to avoid polluting TUI
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
 
-        // Add configured args
         for arg in &self.args {
             cmd.arg(arg);
         }
 
-        // Add start position if resuming
         if let Some(pos) = start_position {
             if pos > 0 {
                 if self.command.contains("mpv") {
@@ -38,15 +38,16 @@ impl ExternalPlayer {
                 } else if self.command.contains("vlc") {
                     cmd.arg(format!("--start-time={}", pos));
                 } else {
-                    // Unknown player, assume maybe mpv-like or just ignore, but log it
-                   warn!("Unknown player '{}', cannot set start position", self.command);
+                    warn!(
+                        "Unknown player '{}', cannot set start position",
+                        self.command
+                    );
                 }
-                
+
                 info!(position = pos, "Resuming playback");
             }
         }
 
-        // Add the file path
         cmd.arg(path);
 
         debug!(command = %self.command, path = %path.display(), "Launching player");
@@ -63,7 +64,6 @@ impl ExternalPlayer {
         Ok(())
     }
 
-    /// Wait for player to exit and return the exit status
     pub fn wait(&mut self) -> Result<bool> {
         if let Some(ref mut child) = self.child {
             let status = child.wait()?;
@@ -74,7 +74,6 @@ impl ExternalPlayer {
         }
     }
 
-    /// Check if player is still running
     pub fn is_running(&mut self) -> bool {
         if let Some(ref mut child) = self.child {
             match child.try_wait() {
@@ -92,12 +91,10 @@ impl ExternalPlayer {
 }
 
 fn resolve_executable(name: &str) -> String {
-    // If it's an absolute path, just use it
     if Path::new(name).is_absolute() {
         return name.to_string();
     }
 
-    // Common Windows installation paths
     #[cfg(target_os = "windows")]
     {
         let common_paths = [
@@ -105,35 +102,39 @@ fn resolve_executable(name: &str) -> String {
             r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
             r"C:\Program Files\mpv\mpv.exe",
             r"C:\Program Files (x86)\mpv\mpv.exe",
-            // Add user local appdata for scoped installs
             r"%LOCALAPPDATA%\Programs\mpv\mpv.exe",
         ];
 
         let lower_name = name.to_lowercase();
-        
-        // If looking for vlc and it's not in path (we can't easily check path existence without trying to spawn, 
+
+        // If looking for vlc and it's not in path (we can't easily check path existence without trying to spawn,
         // but we can check if these files exist and prioritize them if the name matches)
         if lower_name.contains("vlc") {
-            for path in common_paths.iter().filter(|p| p.to_lowercase().contains("vlc")) {
+            for path in common_paths
+                .iter()
+                .filter(|p| p.to_lowercase().contains("vlc"))
+            {
                 let p = Path::new(path);
                 if p.exists() {
-                     debug!("Found VLC at {:?}", p);
+                    debug!("Found VLC at {:?}", p);
                     return path.to_string();
                 }
             }
         }
-        
+
         if lower_name.contains("mpv") {
-            for path in common_paths.iter().filter(|p| p.to_lowercase().contains("mpv")) {
+            for path in common_paths
+                .iter()
+                .filter(|p| p.to_lowercase().contains("mpv"))
+            {
                 let p = Path::new(path);
                 if p.exists() {
-                     debug!("Found MPV at {:?}", p);
+                    debug!("Found MPV at {:?}", p);
                     return path.to_string();
                 }
             }
         }
     }
 
-    // Default to the command name (relies on PATH)
     name.to_string()
 }

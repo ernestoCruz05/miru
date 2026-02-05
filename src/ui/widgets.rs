@@ -4,7 +4,6 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-/// Create a styled block with a title
 pub fn titled_block(title: &str, accent: Color) -> Block<'_> {
     Block::default()
         .borders(Borders::ALL)
@@ -13,7 +12,6 @@ pub fn titled_block(title: &str, accent: Color) -> Block<'_> {
         .title_style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
 }
 
-/// Create a help bar at the bottom
 pub fn help_bar<'a>(hints: &'a [(&'a str, &'a str)]) -> Paragraph<'a> {
     let spans: Vec<Span> = hints
         .iter()
@@ -34,12 +32,9 @@ pub fn help_bar<'a>(hints: &'a [(&'a str, &'a str)]) -> Paragraph<'a> {
     Paragraph::new(Line::from(spans))
 }
 
-/// Format episode number with leading zeros
 pub fn format_episode_num(num: u32) -> String {
     format!("{:02}", num)
 }
-
-/// Parse accent color from config string
 pub fn parse_accent_color(color: &str) -> Color {
     match color.to_lowercase().as_str() {
         "red" => Color::Red,
@@ -50,6 +45,6 @@ pub fn parse_accent_color(color: &str) -> Color {
         "cyan" => Color::Cyan,
         "white" => Color::White,
         "gray" | "grey" => Color::Gray,
-        _ => Color::Magenta, // default
+        _ => Color::Magenta,
     }
 }

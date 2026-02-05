@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -7,29 +7,30 @@ use tracing::debug;
 
 use super::parser::is_video_file;
 
-// Patterns for detecting season folders
-static SEASON_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
-    // "Season 1", "Season 02", "Season 1 - Arc Name"
-    Regex::new(r"(?i)^Season\s*(\d+)").unwrap(),
-    // "S01", "S1", "S01 - Name"
-    Regex::new(r"(?i)^S(\d{1,2})(?:\s|$|-)").unwrap(),
-    // "Part 1", "Part 2"
-    Regex::new(r"(?i)^Part\s*(\d+)").unwrap(),
-    // "Cour 1", "Cour 2"
-    Regex::new(r"(?i)^Cour\s*(\d+)").unwrap(),
-]);
+static SEASON_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        // "Season 1", "Season 02", "Season 1 - Arc Name"
+        Regex::new(r"(?i)^Season\s*(\d+)").unwrap(),
+        // "S01", "S1", "S01 - Name"
+        Regex::new(r"(?i)^S(\d{1,2})(?:\s|$|-)").unwrap(),
+        // "Part 1", "Part 2"
+        Regex::new(r"(?i)^Part\s*(\d+)").unwrap(),
+        // "Cour 1", "Cour 2"
+        Regex::new(r"(?i)^Cour\s*(\d+)").unwrap(),
+    ]
+});
 
-// Patterns for detecting special content folders
-static SPECIAL_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| vec![
-    ("ova", Regex::new(r"(?i)^(OVA|OAV|OAD)s?$").unwrap()),
-    ("special", Regex::new(r"(?i)^Specials?$").unwrap()),
-    ("movie", Regex::new(r"(?i)^Movies?$").unwrap()),
-    ("extra", Regex::new(r"(?i)^Extras?$").unwrap()),
-    ("extra", Regex::new(r"(?i)^Bonus$").unwrap()),
-    ("extra", Regex::new(r"(?i)^NC[OE][PD]s?$").unwrap()), // NCOP/NCED
-]);
+static SPECIAL_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
+    vec![
+        ("ova", Regex::new(r"(?i)^(OVA|OAV|OAD)s?$").unwrap()),
+        ("special", Regex::new(r"(?i)^Specials?$").unwrap()),
+        ("movie", Regex::new(r"(?i)^Movies?$").unwrap()),
+        ("extra", Regex::new(r"(?i)^Extras?$").unwrap()),
+        ("extra", Regex::new(r"(?i)^Bonus$").unwrap()),
+        ("extra", Regex::new(r"(?i)^NC[OE][PD]s?$").unwrap()), // NCOP/NCED
+    ]
+});
 
-/// Category of a folder within a batch
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FolderCategory {
     /// A season folder (e.g., "Season 1", "S02")
@@ -46,7 +47,6 @@ pub enum FolderCategory {
     Unknown,
 }
 
-/// Information about a detected season
 #[derive(Debug, Clone)]
 pub struct SeasonInfo {
     pub number: u32,
@@ -55,7 +55,6 @@ pub struct SeasonInfo {
     pub episodes: Vec<PathBuf>,
 }
 
-/// Information about special content (OVAs, movies, extras)
 #[derive(Debug, Clone, Default)]
 pub struct SpecialsInfo {
     pub ovas: Vec<PathBuf>,
@@ -66,7 +65,10 @@ pub struct SpecialsInfo {
 
 impl SpecialsInfo {
     pub fn is_empty(&self) -> bool {
-        self.ovas.is_empty() && self.movies.is_empty() && self.specials.is_empty() && self.extras.is_empty()
+        self.ovas.is_empty()
+            && self.movies.is_empty()
+            && self.specials.is_empty()
+            && self.extras.is_empty()
     }
 
     pub fn total_count(&self) -> usize {
@@ -74,23 +76,16 @@ impl SpecialsInfo {
     }
 }
 
-/// Complete analysis of a batch download folder structure
 #[derive(Debug, Clone)]
 pub struct BatchAnalysis {
-    /// Whether this appears to be a batch (multiple episodes/seasons)
     pub is_batch: bool,
-    /// Total number of video files found
     pub total_videos: usize,
-    /// Detected seasons with their episodes
     pub seasons: Vec<SeasonInfo>,
-    /// Special content (OVAs, movies, etc.)
     pub specials: SpecialsInfo,
-    /// Video files in the root folder (not in any subfolder)
     pub loose_episodes: Vec<PathBuf>,
 }
 
 impl BatchAnalysis {
-    /// Create an empty analysis (not a batch)
     pub fn empty() -> Self {
         Self {
             is_batch: false,
@@ -101,10 +96,9 @@ impl BatchAnalysis {
         }
     }
 
-    /// Get a summary string for display
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
-        
+
         if !self.seasons.is_empty() {
             parts.push(format!("{} season(s)", self.seasons.len()));
         }
@@ -129,9 +123,7 @@ impl BatchAnalysis {
     }
 }
 
-/// Categorize a folder by its name
 pub fn categorize_folder(name: &str) -> FolderCategory {
-    // Check season patterns first
     for pattern in SEASON_PATTERNS.iter() {
         if let Some(caps) = pattern.captures(name) {
             if let Some(num_match) = caps.get(1) {
@@ -142,7 +134,6 @@ pub fn categorize_folder(name: &str) -> FolderCategory {
         }
     }
 
-    // Check special patterns
     for (category, pattern) in SPECIAL_PATTERNS.iter() {
         if pattern.is_match(name) {
             return match *category {
@@ -158,7 +149,6 @@ pub fn categorize_folder(name: &str) -> FolderCategory {
     FolderCategory::Unknown
 }
 
-/// Quick check if a path appears to be a batch download folder
 pub fn is_batch_folder(path: &Path) -> bool {
     if !path.is_dir() {
         return false;
@@ -176,7 +166,6 @@ pub fn is_batch_folder(path: &Path) -> bool {
         if entry_path.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
             if categorize_folder(&name) != FolderCategory::Unknown {
-                // Has recognizable subfolder structure
                 return true;
             }
             subdir_count += 1;
@@ -188,13 +177,9 @@ pub fn is_batch_folder(path: &Path) -> bool {
         }
     }
 
-    // Consider it a batch if:
-    // - Has 4+ video files (likely a season), or
-    // - Has subdirectories (could be multi-season)
     video_count >= 4 || subdir_count > 0
 }
 
-/// Collect all video files in a directory (non-recursive)
 fn collect_videos_in_dir(path: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(path) else {
         return Vec::new();
@@ -208,11 +193,10 @@ fn collect_videos_in_dir(path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Analyze a batch download folder structure
 pub fn analyze_batch(path: &Path) -> BatchAnalysis {
     if !path.is_dir() {
-        // Single file, not a batch folder
-        if path.is_file() && is_video_file(&path.file_name().unwrap_or_default().to_string_lossy()) {
+        if path.is_file() && is_video_file(&path.file_name().unwrap_or_default().to_string_lossy())
+        {
             return BatchAnalysis {
                 is_batch: false,
                 total_videos: 1,
@@ -232,10 +216,8 @@ pub fn analyze_batch(path: &Path) -> BatchAnalysis {
         loose_episodes: Vec::new(),
     };
 
-    // Collect loose videos in root
     analysis.loose_episodes = collect_videos_in_dir(path);
 
-    // Scan subdirectories
     let Ok(entries) = fs::read_dir(path) else {
         return analysis;
     };
@@ -274,36 +256,41 @@ pub fn analyze_batch(path: &Path) -> BatchAnalysis {
                 analysis.specials.extras.extend(videos);
             }
             FolderCategory::Unknown => {
-                // Recursively check if this unknown folder contains seasons
-                // This handles cases like "Show Name/Season 1/..."
                 let sub_analysis = analyze_batch(&entry_path);
                 if !sub_analysis.seasons.is_empty() {
                     analysis.seasons.extend(sub_analysis.seasons);
                     analysis.specials.ovas.extend(sub_analysis.specials.ovas);
-                    analysis.specials.movies.extend(sub_analysis.specials.movies);
-                    analysis.specials.specials.extend(sub_analysis.specials.specials);
-                    analysis.specials.extras.extend(sub_analysis.specials.extras);
+                    analysis
+                        .specials
+                        .movies
+                        .extend(sub_analysis.specials.movies);
+                    analysis
+                        .specials
+                        .specials
+                        .extend(sub_analysis.specials.specials);
+                    analysis
+                        .specials
+                        .extras
+                        .extend(sub_analysis.specials.extras);
                 } else {
-                    // Treat as loose episodes
                     analysis.loose_episodes.extend(videos);
                 }
             }
         }
     }
 
-    // Sort seasons by number
     analysis.seasons.sort_by_key(|s| s.number);
 
-    // Calculate totals
     analysis.total_videos = analysis.loose_episodes.len()
-        + analysis.seasons.iter().map(|s| s.episodes.len()).sum::<usize>()
+        + analysis
+            .seasons
+            .iter()
+            .map(|s| s.episodes.len())
+            .sum::<usize>()
         + analysis.specials.total_count();
 
-    // Determine if this is a batch
-    // Batch if: multiple seasons, or 4+ episodes, or has specials
-    analysis.is_batch = !analysis.seasons.is_empty()
-        || analysis.total_videos >= 4
-        || !analysis.specials.is_empty();
+    analysis.is_batch =
+        !analysis.seasons.is_empty() || analysis.total_videos >= 4 || !analysis.specials.is_empty();
 
     analysis
 }

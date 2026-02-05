@@ -22,17 +22,15 @@ static EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ]
 });
 
-/// Video file extensions we recognize
 const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "webm", "m4v", "mov"];
 
-/// Compressed file extension
 const COMPRESSED_EXTENSION: &str = ".zst";
 
-/// Extract episode number from a filename
 pub fn parse_episode_number(filename: &str) -> Option<u32> {
-    // Strip .zst extension if present for parsing
-    let filename = filename.strip_suffix(COMPRESSED_EXTENSION).unwrap_or(filename);
-    
+    let filename = filename
+        .strip_suffix(COMPRESSED_EXTENSION)
+        .unwrap_or(filename);
+
     for pattern in EPISODE_PATTERNS.iter() {
         if let Some(caps) = pattern.captures(filename) {
             if let Some(num_match) = caps.get(1) {
@@ -48,21 +46,17 @@ pub fn parse_episode_number(filename: &str) -> Option<u32> {
     None
 }
 
-/// Check if a filename is a video file (including compressed videos)
 pub fn is_video_file(filename: &str) -> bool {
     let lower = filename.to_lowercase();
-    
-    // Check for compressed video files (e.g., .mkv.zst)
+
     if lower.ends_with(COMPRESSED_EXTENSION) {
         let base = &lower[..lower.len() - COMPRESSED_EXTENSION.len()];
         return VIDEO_EXTENSIONS.iter().any(|ext| base.ends_with(ext));
     }
-    
-    // Check for regular video files
+
     VIDEO_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
 }
 
-/// Generate a show ID from a directory name (lowercase, hyphenated)
 pub fn make_show_id(name: &str) -> String {
     name.to_lowercase()
         .chars()
@@ -74,9 +68,7 @@ pub fn make_show_id(name: &str) -> String {
         .join("-")
 }
 
-/// Clean up a directory name into a display title
 pub fn make_show_title(name: &str) -> String {
-    // Replace common separators with spaces and clean up
     name.replace('_', " ")
         .replace('.', " ")
         .split_whitespace()
@@ -84,17 +76,17 @@ pub fn make_show_title(name: &str) -> String {
         .join(" ")
 }
 
-/// Extract release group from filename (e.g. "[SubsPlease] Show..." -> "SubsPlease")
 pub fn parse_release_group(filename: &str) -> Option<String> {
-    // Usually at the start in brackets
-    Regex::new(r"^\[([^\]]+)\]").unwrap().captures(filename).map(|c| c.get(1).unwrap().as_str().to_string())
+    Regex::new(r"^\[([^\]]+)\]")
+        .unwrap()
+        .captures(filename)
+        .map(|c| c.get(1).unwrap().as_str().to_string())
 }
 
-/// Extract quality from filename (e.g. "... [1080p].mkv" -> "1080p")
 pub fn parse_quality(filename: &str) -> Option<String> {
-    // Look for 720p, 1080p, 2160p, 4k
     let re = Regex::new(r"((?:360|480|720|1080|2160)[pP]|4[kK])").unwrap();
-    re.captures(filename).map(|c| c.get(1).unwrap().as_str().to_lowercase())
+    re.captures(filename)
+        .map(|c| c.get(1).unwrap().as_str().to_lowercase())
 }
 
 #[cfg(test)]

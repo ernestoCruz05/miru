@@ -1,10 +1,10 @@
-use humansize::{format_size, BINARY};
+use humansize::{BINARY, format_size};
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{List, ListItem, ListState},
-    Frame,
 };
 
 use crate::torrent::{TorrentState, TorrentStatus};
@@ -41,37 +41,29 @@ pub fn render_downloads_view(
 
             let progress_pct = (t.progress * 100.0) as u8;
 
-            // Format download speed
             let speed = if t.download_rate > 0 {
                 format!("{}/s", format_size(t.download_rate, BINARY))
             } else {
                 String::new()
             };
 
-            // Progress bar using unicode blocks
             let bar_width = 20;
             let filled = ((t.progress * bar_width as f64) as usize).min(bar_width);
             let empty = bar_width - filled;
-            let progress_bar = format!(
-                "{}{}",
-                "█".repeat(filled),
-                "░".repeat(empty)
-            );
+            let progress_bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
 
             let line = Line::from(vec![
                 Span::styled(
                     format!("{:>3}%", progress_pct),
-                    Style::default().fg(state_color).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(state_color)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" "),
                 Span::styled(progress_bar, Style::default().fg(state_color)),
                 Span::raw(" "),
-                Span::styled(
-                    format!("{:>10}", speed),
-                    Style::default().fg(Color::Cyan),
-                ),
+                Span::styled(format!("{:>10}", speed), Style::default().fg(Color::Cyan)),
                 Span::raw(" │ "),
-                // Truncate name if too long
                 Span::raw(truncate_name(&t.name, 50)),
             ]);
 

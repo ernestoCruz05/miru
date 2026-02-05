@@ -1,10 +1,6 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-// ============================================================================
-// TYPES
-// ============================================================================
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedQuery {
     pub show_name: String,
@@ -17,14 +13,9 @@ pub struct ParsedQuery {
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
     pub primary: String,
-    /// Alternative queries tried in order if primary fails
     pub alternatives: Vec<String>,
     pub parsed: ParsedQuery,
 }
-
-// ============================================================================
-// REGEX PATTERNS
-// ============================================================================
 
 static SEASON_EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
@@ -61,10 +52,6 @@ static TITLE_CLEANUP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(the|a|an)\b").unwrap()
 });
 
-// ============================================================================
-// CORE PARSING LOGIC
-// ============================================================================
-
 pub fn parse_query(query: &str) -> ParsedQuery {
     let query = query.trim();
     let mut show_name = query.to_string();
@@ -72,15 +59,12 @@ pub fn parse_query(query: &str) -> ParsedQuery {
     let mut episode: Option<u32> = None;
     let is_batch = BATCH_INDICATORS.is_match(query);
 
-    // Try to match season + episode patterns first
     for pattern in SEASON_EPISODE_PATTERNS.iter() {
         if let Some(caps) = pattern.captures(query) {
-            // Everything before the match is the show name
             let match_start = caps.get(0).unwrap().start();
             show_name = query[..match_start].trim().to_string();
 
             if caps.len() == 2 {
-                // Handle episode-only pattern (implies Season 1)
                 season = Some(1);
                 episode = caps.get(1).and_then(|m| m.as_str().parse().ok());
             } else {
@@ -91,7 +75,6 @@ pub fn parse_query(query: &str) -> ParsedQuery {
         }
     }
 
-    // Fallback: try season-only patterns if no episode found
     if episode.is_none() {
         for pattern in SEASON_ONLY_PATTERNS.iter() {
             if let Some(caps) = pattern.captures(query) {
@@ -116,9 +99,8 @@ pub fn parse_query(query: &str) -> ParsedQuery {
 
 fn normalize_show_name(name: &str) -> String {
     let name = name.trim();
-    // Remove trailing punctuation (e.g. from "Show Name -")
     let name = name.trim_end_matches(|c: char| c == '-' || c == ':' || c.is_whitespace());
-    
+
     let parts: Vec<&str> = name.split_whitespace().collect();
     parts.join(" ")
 }
@@ -139,15 +121,9 @@ fn format_season(season: u32) -> String {
     }
 }
 
-// ============================================================================
-// SEARCH QUERY GENERATION
-// ============================================================================
-
-/// Generate optimized search queries from user input
 pub fn build_search_query(input: &str) -> SearchQuery {
     let parsed = parse_query(input);
 
-    // If we couldn't parse anything meaningful, just return the raw query
     if parsed.show_name.is_empty() {
         return SearchQuery {
             primary: parsed.raw_query.clone(),
@@ -161,7 +137,6 @@ pub fn build_search_query(input: &str) -> SearchQuery {
     } else if let Some(ep) = parsed.episode {
         generate_episode_queries(&parsed, ep)
     } else {
-        // Just a show name, no season/episode
         generate_show_queries(&parsed)
     };
 
@@ -172,14 +147,12 @@ pub fn build_search_query(input: &str) -> SearchQuery {
     }
 }
 
-/// Generate queries for batch/complete season downloads
 fn generate_batch_queries(parsed: &ParsedQuery) -> Vec<String> {
     let show = &parsed.show_name;
     let mut queries = Vec::new();
 
     match parsed.season {
         Some(1) => {
-            // Season 1 batch - various naming conventions
             queries.push(format!("{} batch", show));
             queries.push(format!("{} complete", show));
             queries.push(format!("{} 1080p batch", show));
@@ -187,16 +160,14 @@ fn generate_batch_queries(parsed: &ParsedQuery) -> Vec<String> {
             queries.push(format!("{} S01", show));
         }
         Some(s) => {
-            // Other seasons
             let s_fmt = format_season(s);
             queries.push(format!("{} S{} batch", show, s_fmt));
             queries.push(format!("{} Season {} batch", show, s));
             queries.push(format!("{} S{}", show, s_fmt));
             queries.push(format!("{} Season {}", show, s));
-            queries.push(format!("{} {}nd Season", show, s)); // 2nd Season, etc.
+            queries.push(format!("{} {}nd Season", show, s));
         }
         None => {
-            // No season specified, generic batch
             queries.push(format!("{} batch", show));
             queries.push(format!("{} complete", show));
             queries.push(show.clone());
@@ -206,7 +177,6 @@ fn generate_batch_queries(parsed: &ParsedQuery) -> Vec<String> {
     queries
 }
 
-/// Generate queries for specific episode searches
 fn generate_episode_queries(parsed: &ParsedQuery, episode: u32) -> Vec<String> {
     let show = &parsed.show_name;
     let ep = format_episode(episode);
@@ -214,9 +184,6 @@ fn generate_episode_queries(parsed: &ParsedQuery, episode: u32) -> Vec<String> {
 
     match parsed.season {
         Some(1) | None => {
-            // Season 1 (or unspecified, assume S1)
-            // Most anime uses absolute episode numbers for S1
-
             // Primary: "Show Name 09" - most common format
             queries.push(format!("{} {}", show, ep));
 
@@ -256,7 +223,6 @@ fn generate_episode_queries(parsed: &ParsedQuery, episode: u32) -> Vec<String> {
             // Some shows use "Part 2" instead of "Season 2"
             queries.push(format!("{} Part {} {}", show, s, ep));
 
-            // Try absolute numbering (S2E5 might be episode 17 absolute)
             // This is a rough estimate - 12 eps per season is common
             let absolute_estimate = (s - 1) * 12 + episode;
             queries.push(format!("{} {}", show, format_episode(absolute_estimate)));
@@ -266,7 +232,6 @@ fn generate_episode_queries(parsed: &ParsedQuery, episode: u32) -> Vec<String> {
     queries
 }
 
-/// Generate queries for show-only searches (no specific episode)
 fn generate_show_queries(parsed: &ParsedQuery) -> Vec<String> {
     let show = &parsed.show_name;
 
@@ -277,7 +242,6 @@ fn generate_show_queries(parsed: &ParsedQuery) -> Vec<String> {
     ]
 }
 
-/// Convert number to ordinal suffix (2 -> "2nd Season")
 fn ordinal(n: u32) -> String {
     let suffix = match n % 10 {
         1 if n % 100 != 11 => "st",
@@ -288,22 +252,14 @@ fn ordinal(n: u32) -> String {
     format!("{}{} Season", n, suffix)
 }
 
-// ============================================================================
-// RESULT FILTERING (Post-search refinement)
-// ============================================================================
-
-/// Score a search result based on how well it matches the parsed query
-/// Higher score = better match
 pub fn score_result(result_title: &str, parsed: &ParsedQuery) -> i32 {
     let title_lower = result_title.to_lowercase();
     let show_lower = parsed.show_name.to_lowercase();
     let mut score = 0;
 
-    // Check if show name is in title
     if title_lower.contains(&show_lower) {
         score += 100;
     } else {
-        // Try matching individual words
         let show_words: Vec<&str> = show_lower.split_whitespace().collect();
         let matched_words = show_words
             .iter()
@@ -312,7 +268,6 @@ pub fn score_result(result_title: &str, parsed: &ParsedQuery) -> i32 {
         score += (matched_words * 20) as i32;
     }
 
-    // Check episode number
     if let Some(ep) = parsed.episode {
         let ep_padded = format_episode(ep);
         let ep_patterns = [
@@ -331,7 +286,6 @@ pub fn score_result(result_title: &str, parsed: &ParsedQuery) -> i32 {
         }
     }
 
-    // Check season
     if let Some(s) = parsed.season {
         if s > 1 {
             let s_padded = format_season(s);
@@ -354,18 +308,15 @@ pub fn score_result(result_title: &str, parsed: &ParsedQuery) -> i32 {
         }
     }
 
-    // Prefer 1080p
     if title_lower.contains("1080p") {
         score += 10;
     }
 
-    // Prefer known good subgroups (examples)
     let good_subgroups = ["subsplease", "erai-raws", "judas", "horriblesubs"];
     if good_subgroups.iter().any(|g| title_lower.contains(g)) {
         score += 15;
     }
 
-    // Penalize batch results when looking for specific episode
     if parsed.episode.is_some() && !parsed.is_batch_request {
         let batch_indicators = ["batch", "complete", "1-", "01-"];
         if batch_indicators.iter().any(|b| title_lower.contains(b)) {
@@ -373,7 +324,6 @@ pub fn score_result(result_title: &str, parsed: &ParsedQuery) -> i32 {
         }
     }
 
-    // Penalize very old/low quality
     if title_lower.contains("480p") || title_lower.contains("360p") {
         score -= 20;
     }
@@ -381,7 +331,6 @@ pub fn score_result(result_title: &str, parsed: &ParsedQuery) -> i32 {
     score
 }
 
-/// Filter and sort search results based on relevance to the query
 pub fn rank_results<T, F>(results: &mut [T], parsed: &ParsedQuery, get_title: F)
 where
     F: Fn(&T) -> &str,
@@ -393,27 +342,18 @@ where
     });
 }
 
-// ============================================================================
-// HIGH-LEVEL API
-// ============================================================================
-
 /// Main entry point: convert user input to search queries
 ///
 /// # Examples
-/// ```
 /// let result = smart_search("Frieren S01E09");
 /// assert_eq!(result.primary, "Frieren 09");
 ///
 /// let result = smart_search("One Piece S02");
 /// assert!(result.parsed.is_batch_request);
-/// ```
+
 pub fn smart_search(input: &str) -> SearchQuery {
     build_search_query(input)
 }
-
-// ============================================================================
-// TESTS
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -473,7 +413,7 @@ mod tests {
     fn test_parse_episode_only() {
         let parsed = parse_query("Frieren Episode 9");
         assert_eq!(parsed.show_name, "Frieren");
-        assert_eq!(parsed.season, Some(1)); // Implied
+        assert_eq!(parsed.season, Some(1));
         assert_eq!(parsed.episode, Some(9));
     }
 
@@ -493,7 +433,6 @@ mod tests {
     #[test]
     fn test_generate_s02_episode_queries() {
         let query = smart_search("Attack on Titan S02E05");
-        // Should include season indicator for S2+
         assert!(query.primary.contains("S02") || query.primary.contains("Season 2"));
     }
 
@@ -501,7 +440,10 @@ mod tests {
     fn test_generate_batch_queries() {
         let query = smart_search("Frieren S01");
         assert!(query.parsed.is_batch_request);
-        assert!(query.primary.contains("batch") || query.alternatives.iter().any(|q| q.contains("batch")));
+        assert!(
+            query.primary.contains("batch")
+                || query.alternatives.iter().any(|q| q.contains("batch"))
+        );
     }
 
     #[test]

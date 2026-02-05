@@ -1,9 +1,9 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 use regex::Regex;
 
@@ -26,11 +26,11 @@ fn truncate_title(title: &str, max_width: usize) -> String {
 
     // Episode patterns: - 01, E01, EP01, Episode 5, S01E05
     let episode_patterns = [
-        r"- (\d{2,3})",              // " - 01", " - 123"
-        r"\bE(\d{2,3})\b",           // "E01", "E123"
-        r"\bEP(\d{2,3})\b",          // "EP01", "EP123"
-        r"\bEpisode (\d+)\b",        // "Episode 5"
-        r"\b(S\d+E\d+)\b",           // "S01E05"
+        r"- (\d{2,3})",       // " - 01", " - 123"
+        r"\bE(\d{2,3})\b",    // "E01", "E123"
+        r"\bEP(\d{2,3})\b",   // "EP01", "EP123"
+        r"\bEpisode (\d+)\b", // "Episode 5"
+        r"\b(S\d+E\d+)\b",    // "S01E05"
     ];
 
     // Try to find episode info
@@ -80,23 +80,26 @@ pub fn render_search_view(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Search input
-            Constraint::Length(1), // Filter bar
-            Constraint::Min(3),    // Results
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(3),
         ])
         .split(area);
 
-    // Search input
     render_search_input(frame, chunks[0], query, is_loading, accent);
 
-    // Filter bar
     render_filter_bar(frame, chunks[1], category, filter, sort);
 
-    // Results list
     render_search_results(frame, chunks[2], results, list_state, accent);
 }
 
-fn render_search_input(frame: &mut Frame, area: Rect, query: &str, is_loading: bool, accent: Color) {
+fn render_search_input(
+    frame: &mut Frame,
+    area: Rect,
+    query: &str,
+    is_loading: bool,
+    accent: Color,
+) {
     let title = if is_loading {
         " Search nyaa.si (loading...) "
     } else {
@@ -115,11 +118,16 @@ fn render_search_input(frame: &mut Frame, area: Rect, query: &str, is_loading: b
 
     frame.render_widget(input, area);
 
-    // Show cursor at end of input
     frame.set_cursor_position((area.x + query.len() as u16 + 1, area.y + 1));
 }
 
-fn render_filter_bar(frame: &mut Frame, area: Rect, category: NyaaCategory, filter: NyaaFilter, sort: NyaaSort) {
+fn render_filter_bar(
+    frame: &mut Frame,
+    area: Rect,
+    category: NyaaCategory,
+    filter: NyaaFilter,
+    sort: NyaaSort,
+) {
     let line = Line::from(vec![
         Span::raw(" "),
         Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
@@ -163,13 +171,11 @@ fn render_search_results(
         return;
     }
 
-    // Layout: star (2) + seeders (4) + sep (3) + size (9) + sep (3) + [BATCH] (8) + sep (3) + highlight (2) + padding (2) = 36
     let title_width = area.width.saturating_sub(36) as usize;
 
     let items: Vec<ListItem> = results
         .iter()
         .map(|r| {
-            // Color seeders based on health, but trusted overrides to LightGreen
             let seeder_color = if r.seeders >= 50 {
                 Color::Green
             } else if r.seeders >= 10 {
@@ -180,7 +186,6 @@ fn render_search_results(
                 Color::DarkGray
             };
 
-            // Trusted torrents get LightGreen seeder color override
             let seeder_style = if r.is_trusted {
                 Style::default()
                     .fg(Color::LightGreen)
@@ -191,21 +196,18 @@ fn render_search_results(
                     .add_modifier(Modifier::BOLD)
             };
 
-            // Trust indicator: green star for trusted, space placeholder for others
             let trust_indicator = if r.is_trusted {
                 Span::styled("★ ", Style::default().fg(Color::LightGreen))
             } else {
                 Span::raw("  ")
             };
 
-            // Batch indicator: [BATCH] tag or empty placeholder
             let batch_indicator = if r.is_batch {
                 Span::styled("[BATCH] ", Style::default().fg(Color::LightYellow))
             } else {
-                Span::raw("        ") // 8 chars for alignment
+                Span::raw("        ")
             };
 
-            // Dim non-trusted, non-batch entries for visual contrast
             let title_style = if r.is_trusted || r.is_batch {
                 Style::default().fg(Color::White)
             } else {
@@ -216,10 +218,7 @@ fn render_search_results(
                 trust_indicator,
                 Span::styled(format!("{:>4}", r.seeders), seeder_style),
                 Span::raw(" │ "),
-                Span::styled(
-                    format!("{:>9}", r.size),
-                    Style::default().fg(Color::Cyan),
-                ),
+                Span::styled(format!("{:>9}", r.size), Style::default().fg(Color::Cyan)),
                 Span::raw(" │ "),
                 batch_indicator,
                 Span::styled(truncate_title(&r.title, title_width), title_style),

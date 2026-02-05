@@ -231,7 +231,6 @@ impl Config {
         Ok(())
     }
 
-    /// Expand ~ to home directory in media paths
     pub fn expanded_media_dirs(&self) -> Vec<PathBuf> {
         self.general
             .media_dirs
@@ -244,7 +243,6 @@ impl Config {
                         if path_str == "~" {
                             return home;
                         }
-                        // Skip the first 2 chars (~/ or ~\)
                         return home.join(&path_str[2..]);
                     }
                 }

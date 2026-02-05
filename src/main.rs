@@ -2,17 +2,17 @@ mod app;
 mod compression;
 mod config;
 mod error;
+mod image_cache;
 mod library;
+mod metadata;
 mod nyaa;
 mod player;
+mod rpc;
 mod torrent;
 mod ui;
-mod rpc;
-mod metadata;
-mod image_cache;
 
 use tracing::info;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::app::App;
 use crate::config::Config;
@@ -35,14 +35,12 @@ fn setup_logging() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Set up file-based logging (we own the terminal for TUI)
     if let Err(e) = setup_logging() {
         eprintln!("Warning: Could not set up logging: {}", e);
     }
 
     info!("Starting miru");
 
-    // Load configuration
     let config = Config::load()?;
     info!("Loaded config");
 

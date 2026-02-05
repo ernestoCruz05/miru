@@ -15,7 +15,6 @@ pub use scanner::scan_all_media_dirs;
 use crate::config::library_path;
 use crate::error::Result;
 
-/// Persisted library state
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Library {
     #[serde(default)]
@@ -49,21 +48,20 @@ impl Library {
         Ok(())
     }
 
-    /// Refresh library by scanning directories, preserving watch progress
     pub fn refresh(&mut self, media_dirs: &[impl AsRef<std::path::Path>]) -> Result<()> {
         let scanned = scan_all_media_dirs(media_dirs)?;
-        info!(count = scanned.len(), "Scanned shows from media directories");
+        info!(
+            count = scanned.len(),
+            "Scanned shows from media directories"
+        );
 
-        // Build a map of existing shows for quick lookup
         let existing: HashMap<String, &Show> =
             self.shows.iter().map(|s| (s.id.clone(), s)).collect();
 
-        // Merge scanned shows with existing watch progress
         let mut merged_shows = Vec::new();
 
         for mut scanned_show in scanned {
             if let Some(existing_show) = existing.get(&scanned_show.id) {
-                // Preserve watch progress from existing episodes
                 let existing_eps: HashMap<u32, &Episode> = existing_show
                     .episodes
                     .iter()
@@ -92,13 +90,12 @@ impl Library {
         self.shows.iter_mut().find(|s| s.id == id)
     }
 
-    /// Toggle watched status for an episode
     pub fn toggle_watched(&mut self, show_id: &str, episode_num: u32) -> bool {
         if let Some(show) = self.get_show_mut(show_id) {
             if let Some(ep) = show.get_episode_mut(episode_num) {
                 ep.watched = !ep.watched;
                 if ep.watched {
-                    ep.last_position = 0; // Reset position when marking as watched
+                    ep.last_position = 0;
                 }
                 return true;
             }
@@ -106,7 +103,6 @@ impl Library {
         false
     }
 
-    /// Update playback position for an episode
     pub fn update_position(&mut self, show_id: &str, episode_num: u32, position: u64) {
         if let Some(show) = self.get_show_mut(show_id) {
             if let Some(ep) = show.get_episode_mut(episode_num) {
@@ -115,7 +111,6 @@ impl Library {
         }
     }
 
-    /// Mark episode as watched
     pub fn mark_watched(&mut self, show_id: &str, episode_num: u32) {
         if let Some(show) = self.get_show_mut(show_id) {
             if let Some(ep) = show.get_episode_mut(episode_num) {
