@@ -1,15 +1,15 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
+    DefaultTerminal, Frame,
     layout::{Constraint, Direction, Layout},
     style::Color,
     widgets::ListState,
-    DefaultTerminal, Frame,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
@@ -17,12 +17,15 @@ use tracing::{debug, error, info};
 use crate::compression;
 use crate::config::Config;
 use crate::error::Result;
-use crate::library::{Library, tracking::{self, UpdateResult}};
+use crate::library::models::TrackedSeries;
+use crate::library::{
+    Library,
+    tracking::{self, UpdateResult},
+};
 use crate::nyaa::{NyaaCategory, NyaaClient, NyaaFilter, NyaaResult, NyaaSort};
 use crate::player::ExternalPlayer;
 use crate::rpc::DiscordRpc;
-use crate::library::models::TrackedSeries;
-use crate::torrent::{AnyTorrentClient, QBittorrentClient, TransmissionClient, TorrentStatus};
+use crate::torrent::{AnyTorrentClient, QBittorrentClient, TorrentStatus, TransmissionClient};
 use crate::ui::{
     render_downloads_view, render_episodes_view, render_library_view, render_search_view, widgets,
 };
@@ -33,7 +36,7 @@ const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "webm", "m4v", "mov", "
 /// e.g., "[SubGroup] Show Name - 01 (1080p) [HASH].mkv" -> "Show Name - S01E01.mkv"
 fn clean_filename(name: &str) -> String {
     let mut clean = name.to_string();
-    
+
     // Remove [...] bracketed content (subgroup, hash, quality info)
     while let (Some(start), Some(end)) = (clean.find('['), clean.find(']')) {
         if start < end {
@@ -42,7 +45,7 @@ fn clean_filename(name: &str) -> String {
             break;
         }
     }
-    
+
     // Remove (...) parenthetical content (resolution, codec info)
     while let (Some(start), Some(end)) = (clean.find('('), clean.find(')')) {
         if start < end {
@@ -51,17 +54,27 @@ fn clean_filename(name: &str) -> String {
             break;
         }
     }
-    
-    clean = clean.replace("  ", " ").replace("..", ".").trim().to_string();
-    
+
+    clean = clean
+        .replace("  ", " ")
+        .replace("..", ".")
+        .trim()
+        .to_string();
+
     // Try to extract episode number from common patterns
     let episode_patterns = [
-        (regex::Regex::new(r"[Ss](\d{1,2})[Ee](\d{1,3})").unwrap(), true),  // S01E01
-        (regex::Regex::new(r"[Ee][Pp]?\.?\s*(\d{1,3})").unwrap(), false),   // E01, EP01, Ep 01
-        (regex::Regex::new(r"\s-\s*(\d{1,3})\b").unwrap(), false),          // - 01
-        (regex::Regex::new(r"#(\d{1,3})").unwrap(), false),                  // #01
+        (
+            regex::Regex::new(r"[Ss](\d{1,2})[Ee](\d{1,3})").unwrap(),
+            true,
+        ), // S01E01
+        (
+            regex::Regex::new(r"[Ee][Pp]?\.?\s*(\d{1,3})").unwrap(),
+            false,
+        ), // E01, EP01, Ep 01
+        (regex::Regex::new(r"\s-\s*(\d{1,3})\b").unwrap(), false), // - 01
+        (regex::Regex::new(r"#(\d{1,3})").unwrap(), false),        // #01
     ];
-    
+
     for (re, has_season) in &episode_patterns {
         if let Some(caps) = re.captures(&clean) {
             if *has_season {
@@ -70,7 +83,8 @@ fn clean_filename(name: &str) -> String {
                 let show_name = clean[..caps.get(0).unwrap().start()].trim();
                 let show_name = show_name.trim_end_matches(&['-', '.', ' '][..]);
                 let show_name = show_name.replace('/', "-").replace('\\', "-");
-                let ext = Path::new(name).extension()
+                let ext = Path::new(name)
+                    .extension()
                     .and_then(|e| e.to_str())
                     .filter(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
                     .unwrap_or("mkv");
@@ -80,7 +94,8 @@ fn clean_filename(name: &str) -> String {
                 let show_name = clean[..caps.get(0).unwrap().start()].trim();
                 let show_name = show_name.trim_end_matches(&['-', '.', ' '][..]);
                 let show_name = show_name.replace('/', "-").replace('\\', "-");
-                let ext = Path::new(name).extension()
+                let ext = Path::new(name)
+                    .extension()
                     .and_then(|e| e.to_str())
                     .filter(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
                     .unwrap_or("mkv");
@@ -88,14 +103,22 @@ fn clean_filename(name: &str) -> String {
             }
         }
     }
-    let clean_name = clean.replace('/', "-").replace('\\', "-").trim().to_string();
-    let ext = Path::new(name).extension()
+    let clean_name = clean
+        .replace('/', "-")
+        .replace('\\', "-")
+        .trim()
+        .to_string();
+    let ext = Path::new(name)
+        .extension()
         .and_then(|e| e.to_str())
         .filter(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()));
-    
+
     match ext {
         Some(e) => {
-            if clean_name.to_lowercase().ends_with(&format!(".{}", e.to_lowercase())) {
+            if clean_name
+                .to_lowercase()
+                .ends_with(&format!(".{}", e.to_lowercase()))
+            {
                 clean_name
             } else {
                 format!("{}.{}", clean_name, e)
@@ -177,7 +200,7 @@ pub enum View {
     Search,
     Downloads,
     MoveDialog,
-    TrackingDialog, 
+    TrackingDialog,
     DeleteDialog,
     Help,
     TrackingList,
@@ -185,8 +208,8 @@ pub enum View {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeleteTarget {
-    Show(usize), 
-    Episode(usize, usize), 
+    Show(usize),
+    Episode(usize, usize),
 }
 
 pub struct DeleteDialogState {
@@ -197,7 +220,7 @@ pub struct DeleteDialogState {
 impl Default for DeleteDialogState {
     fn default() -> Self {
         Self {
-            target: DeleteTarget::Show(0), 
+            target: DeleteTarget::Show(0),
             name: String::new(),
         }
     }
@@ -312,7 +335,7 @@ pub struct App {
 
     pub move_dialog: MoveDialogState,
     pub tracking_state: TrackingDialogState,
-    pub delete_dialog_state: DeleteDialogState, 
+    pub delete_dialog_state: DeleteDialogState,
 
     pub msg_tx: mpsc::UnboundedSender<AppMessage>,
     pub msg_rx: mpsc::UnboundedReceiver<AppMessage>,
@@ -342,14 +365,16 @@ impl App {
 
         let metadata_provider: Option<Arc<dyn crate::metadata::MetadataProvider + Send + Sync>> =
             if !config.metadata.mal_client_id.is_empty() {
-                Some(Arc::new(crate::metadata::mal::MalClient::new(config.metadata.mal_client_id.clone())))
+                Some(Arc::new(crate::metadata::mal::MalClient::new(
+                    config.metadata.mal_client_id.clone(),
+                )))
             } else {
                 None
             };
-        
+
         let image_cache = Arc::new(crate::image_cache::ImageCache::new().unwrap_or_else(|e| {
             tracing::error!("Failed to initialize image cache: {}", e);
-             panic!("Failed to initialize image cache: {}", e);
+            panic!("Failed to initialize image cache: {}", e);
         }));
 
         Self {
@@ -392,14 +417,14 @@ impl App {
             image_cache,
             picker,
             rpc: Some(DiscordRpc::new("1465518237599928381")),
-            managed_daemon_handle: None, 
+            managed_daemon_handle: None,
             startup_scan_completed: false,
         }
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         self.refresh_torrent_list();
-        
+
         self.spawn_managed_daemon();
 
         while self.running {
@@ -407,7 +432,7 @@ impl App {
             self.handle_events().await?;
             self.process_messages();
         }
-        
+
         self.cleanup();
         Ok(())
     }
@@ -437,7 +462,7 @@ impl App {
                 AppMessage::MetadataFound(show_id, metadata) => {
                     if let Some(show) = self.library.shows.iter_mut().find(|s| s.id == show_id) {
                         info!("Updated metadata for: {}", show.title);
-                        
+
                         if let Some(url) = metadata.cover_url.clone() {
                             let cache = self.image_cache.clone();
                             let tx = self.msg_tx.clone();
@@ -456,7 +481,7 @@ impl App {
                     }
                 }
                 AppMessage::CoverUpdated(show_id) => {
-                     info!("Cover image updated for show: {}", show_id);
+                    info!("Cover image updated for show: {}", show_id);
                 }
                 AppMessage::MetadataError(e) => {
                     error!("Metadata fetch failed: {}", e);
@@ -466,7 +491,7 @@ impl App {
                     if !self.torrents.is_empty() && self.downloads_state.selected().is_none() {
                         self.downloads_state.select(Some(0));
                     }
-                    
+
                     if !self.startup_scan_completed {
                         self.startup_scan_completed = true;
                         self.check_for_updates();
@@ -474,25 +499,33 @@ impl App {
                 }
                 AppMessage::UpdatesFound(updates) => {
                     for update in updates {
-                        let already_active = self.torrents.iter().any(|t| {
-                            t.name.to_lowercase() == update.title.to_lowercase()
-                        });
+                        let already_active = self
+                            .torrents
+                            .iter()
+                            .any(|t| t.name.to_lowercase() == update.title.to_lowercase());
                         if already_active {
                             debug!("Skipping auto-download (already active): {}", update.title);
                             continue;
                         }
-                        
+
                         if let Some(client) = &self.torrent_client {
-                           info!("Auto-downloading: {} - {}", update.series_title, update.title);
-                           let client = client.clone();
-                           let magnet = update.magnet.clone();
-                           let tx = self.msg_tx.clone();
-                           tokio::spawn(async move {
-                               match client.add_magnet(&magnet).await {
-                                   Ok(_) => { let _ = tx.send(AppMessage::TorrentAdded(magnet)); }
-                                   Err(e) => { let _ = tx.send(AppMessage::TorrentError(e.to_string())); }
-                               }
-                           });
+                            info!(
+                                "Auto-downloading: {} - {}",
+                                update.series_title, update.title
+                            );
+                            let client = client.clone();
+                            let magnet = update.magnet.clone();
+                            let tx = self.msg_tx.clone();
+                            tokio::spawn(async move {
+                                match client.add_magnet(&magnet).await {
+                                    Ok(_) => {
+                                        let _ = tx.send(AppMessage::TorrentAdded(magnet));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(AppMessage::TorrentError(e.to_string()));
+                                    }
+                                }
+                            });
                         }
                     }
                 }
@@ -521,10 +554,7 @@ impl App {
                     &mut self.picker,
                 );
 
-                let help = widgets::help_bar(&[
-                    ("?", "help"),
-                    ("q", "quit"),
-                ]);
+                let help = widgets::help_bar(&[("?", "help"), ("q", "quit")]);
                 frame.render_widget(help, help_area);
             }
             View::Episodes => {
@@ -540,10 +570,7 @@ impl App {
                     }
                 }
 
-                let help = widgets::help_bar(&[
-                    ("?", "help"),
-                    ("Esc", "back"),
-                ]);
+                let help = widgets::help_bar(&[("?", "help"), ("Esc", "back")]);
                 frame.render_widget(help, help_area);
             }
             View::Search => {
@@ -560,10 +587,7 @@ impl App {
                     self.accent,
                 );
 
-                let help = widgets::help_bar(&[
-                    ("?", "help"),
-                    ("Esc", "back"),
-                ]);
+                let help = widgets::help_bar(&[("?", "help"), ("Esc", "back")]);
                 frame.render_widget(help, help_area);
             }
             View::Downloads => {
@@ -575,10 +599,7 @@ impl App {
                     self.accent,
                 );
 
-                let help = widgets::help_bar(&[
-                    ("?", "help"),
-                    ("Esc", "back"),
-                ]);
+                let help = widgets::help_bar(&[("?", "help"), ("Esc", "back")]);
                 frame.render_widget(help, help_area);
             }
             View::MoveDialog => {
@@ -593,9 +614,20 @@ impl App {
                 self.render_move_dialog(frame);
 
                 let help_text = match self.move_dialog.step {
-                    MoveDialogStep::SelectMediaDir => &[("j/k", "navigate"), ("Enter", "select"), ("Esc", "cancel")][..],
-                    MoveDialogStep::SelectShow => &[("j/k", "navigate"), ("Enter", "select"), ("n", "new folder"), ("Esc", "back")][..],
-                    MoveDialogStep::BatchPreview => &[("Tab/s", "change strategy"), ("Enter", "move"), ("Esc", "back")][..],
+                    MoveDialogStep::SelectMediaDir => {
+                        &[("j/k", "navigate"), ("Enter", "select"), ("Esc", "cancel")][..]
+                    }
+                    MoveDialogStep::SelectShow => &[
+                        ("j/k", "navigate"),
+                        ("Enter", "select"),
+                        ("n", "new folder"),
+                        ("Esc", "back"),
+                    ][..],
+                    MoveDialogStep::BatchPreview => &[
+                        ("Tab/s", "change strategy"),
+                        ("Enter", "move"),
+                        ("Esc", "back"),
+                    ][..],
                     MoveDialogStep::EditFilename => &[("Enter", "confirm"), ("Esc", "back")][..],
                 };
                 let help = widgets::help_bar(help_text);
@@ -612,52 +644,87 @@ impl App {
                     &mut self.picker,
                 );
                 self.render_tracking_dialog(frame);
-                
-                let help = widgets::help_bar(&[
-                    ("Enter", "next/confirm"),
-                    ("Esc", "cancel"),
-                ]);
+
+                let help = widgets::help_bar(&[("Enter", "next/confirm"), ("Esc", "cancel")]);
                 frame.render_widget(help, help_area);
             }
             View::DeleteDialog => {
                 match self.delete_dialog_state.target {
-                     DeleteTarget::Show(_) => {
-                        render_library_view(frame, main_area, &self.library.shows, &mut self.library_state, self.accent, &self.image_cache, &mut self.picker);
-                     }
-                     DeleteTarget::Episode(idx, _) => {
-                         if let Some(show) = self.library.shows.get(idx) {
-                             render_episodes_view(frame, main_area, show, &mut self.episodes_state, self.accent);
-                         }
-                     }
+                    DeleteTarget::Show(_) => {
+                        render_library_view(
+                            frame,
+                            main_area,
+                            &self.library.shows,
+                            &mut self.library_state,
+                            self.accent,
+                            &self.image_cache,
+                            &mut self.picker,
+                        );
+                    }
+                    DeleteTarget::Episode(idx, _) => {
+                        if let Some(show) = self.library.shows.get(idx) {
+                            render_episodes_view(
+                                frame,
+                                main_area,
+                                show,
+                                &mut self.episodes_state,
+                                self.accent,
+                            );
+                        }
+                    }
                 }
                 self.render_delete_dialog(frame);
-                let help = widgets::help_bar(&[
-                    ("Enter", "confirm delete"),
-                    ("Esc", "cancel"),
-                ]);
+                let help = widgets::help_bar(&[("Enter", "confirm delete"), ("Esc", "cancel")]);
                 frame.render_widget(help, help_area);
             }
             View::TrackingList => {
                 self.render_tracking_list(frame, main_area);
-                let help = widgets::help_bar(&[
-                    ("?", "help"), 
-                    ("x", "untrack"),
-                    ("Esc", "back")
-                ]);
+                let help = widgets::help_bar(&[("?", "help"), ("x", "untrack"), ("Esc", "back")]);
                 frame.render_widget(help, help_area);
             }
             View::Help => {
                 match self.previous_view {
-                    View::Library => render_library_view(frame, main_area, &self.library.shows, &mut self.library_state, self.accent, &self.image_cache, &mut self.picker),
+                    View::Library => render_library_view(
+                        frame,
+                        main_area,
+                        &self.library.shows,
+                        &mut self.library_state,
+                        self.accent,
+                        &self.image_cache,
+                        &mut self.picker,
+                    ),
                     View::Episodes => {
                         if let Some(idx) = self.selected_show_idx {
                             if let Some(show) = self.library.shows.get(idx) {
-                                render_episodes_view(frame, main_area, show, &mut self.episodes_state, self.accent);
+                                render_episodes_view(
+                                    frame,
+                                    main_area,
+                                    show,
+                                    &mut self.episodes_state,
+                                    self.accent,
+                                );
                             }
                         }
                     }
-                    View::Search => render_search_view(frame, main_area, &self.search_query, &self.search_results, &mut self.search_state, self.search_loading, self.search_category, self.search_filter, self.search_sort, self.accent),
-                    View::Downloads => render_downloads_view(frame, main_area, &self.torrents, &mut self.downloads_state, self.accent),
+                    View::Search => render_search_view(
+                        frame,
+                        main_area,
+                        &self.search_query,
+                        &self.search_results,
+                        &mut self.search_state,
+                        self.search_loading,
+                        self.search_category,
+                        self.search_filter,
+                        self.search_sort,
+                        self.accent,
+                    ),
+                    View::Downloads => render_downloads_view(
+                        frame,
+                        main_area,
+                        &self.torrents,
+                        &mut self.downloads_state,
+                        self.accent,
+                    ),
                     View::TrackingList => self.render_tracking_list(frame, main_area),
                     _ => {}
                 }
@@ -672,8 +739,7 @@ impl App {
                 if key.kind != KeyEventKind::Press {
                     return Ok(());
                 }
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
-                {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     self.running = false;
                     return Ok(());
                 }
@@ -718,16 +784,20 @@ impl App {
                             let show_id = show.id.clone();
                             let query = show.title.clone();
                             let tx = self.msg_tx.clone();
-                            
+
                             info!("Fetching metadata for: {}", query);
-                            
+
                             tokio::spawn(async move {
                                 match provider.search(&query).await {
                                     Ok(results) => {
                                         if let Some(first) = results.into_iter().next() {
-                                            let _ = tx.send(AppMessage::MetadataFound(show_id, first));
+                                            let _ =
+                                                tx.send(AppMessage::MetadataFound(show_id, first));
                                         } else {
-                                            let _ = tx.send(AppMessage::MetadataError(format!("No results for: {}", query)));
+                                            let _ = tx.send(AppMessage::MetadataError(format!(
+                                                "No results for: {}",
+                                                query
+                                            )));
                                         }
                                     }
                                     Err(e) => {
@@ -760,10 +830,10 @@ impl App {
                 self.open_delete_show_dialog();
             }
             KeyCode::Char('T') => {
-                 self.view = View::TrackingList;
-                 if !self.library.tracked_shows.is_empty() {
-                     self.tracking_list_state.select(Some(0));
-                 }
+                self.view = View::TrackingList;
+                if !self.library.tracked_shows.is_empty() {
+                    self.tracking_list_state.select(Some(0));
+                }
             }
             KeyCode::Char('?') => {
                 self.toggle_help();
@@ -795,7 +865,7 @@ impl App {
                 self.toggle_watched();
             }
             KeyCode::Char('x') => {
-                 self.open_delete_episode_dialog();
+                self.open_delete_episode_dialog();
             }
             KeyCode::Char('?') => {
                 self.toggle_help();
@@ -815,10 +885,10 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if !self.filtered_search_results.is_empty() {
-                         self.download_selected_torrent();
+                        self.download_selected_torrent();
                     }
                 }
-                 KeyCode::Backspace => {
+                KeyCode::Backspace => {
                     self.search_filter_input.pop();
                     self.update_filtered_results();
                 }
@@ -849,7 +919,7 @@ impl App {
                         self.move_selection_down(&View::Search);
                     }
                 }
-                KeyCode::Up  => {
+                KeyCode::Up => {
                     self.move_selection_up(&View::Search);
                 }
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -877,7 +947,10 @@ impl App {
                     self.toggle_help();
                 }
                 KeyCode::Char(c) => {
-                    if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    {
                         self.search_query.push(c);
                     }
                 }
@@ -892,7 +965,8 @@ impl App {
             self.filtered_search_results = (0..self.search_results.len()).collect();
         } else {
             let filter_lower = self.search_filter_input.to_lowercase();
-            self.filtered_search_results = self.search_results
+            self.filtered_search_results = self
+                .search_results
                 .iter()
                 .enumerate()
                 .filter(|(_, r)| r.title.to_lowercase().contains(&filter_lower))
@@ -1049,11 +1123,16 @@ impl App {
         };
 
         let player_cmd = self.config.general.player.clone();
-        
+
         let args = if player_cmd == "vlc" {
-             self.config.player.vlc.as_ref().map(|p| p.args.clone()).unwrap_or_else(|| vec!["--fullscreen".to_string()])
+            self.config
+                .player
+                .vlc
+                .as_ref()
+                .map(|p| p.args.clone())
+                .unwrap_or_else(|| vec!["--fullscreen".to_string()])
         } else {
-             self.config.player.mpv.args.clone()
+            self.config.player.mpv.args.clone()
         };
 
         let mut player = ExternalPlayer::new(player_cmd, args);
@@ -1065,6 +1144,18 @@ impl App {
         }
 
         player.play(&play_path, start_pos)?;
+
+        let mut last_position: Option<u64> = None;
+        let mut last_duration: u64 = 0;
+        while player.is_running() {
+            if let Some(pos) = player.get_position() {
+                last_position = Some(pos);
+            }
+            if let Some(dur) = player.get_duration() {
+                last_duration = dur;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        }
         player.wait()?;
 
         if let Some(rpc) = &mut self.rpc {
@@ -1076,7 +1167,19 @@ impl App {
             }
         }
 
-        self.library.mark_watched(&show_id, episode_number);
+        // Save position or mark watched based on how far they got
+        if let Some(pos) = last_position {
+            if last_duration > 0 && pos > last_duration.saturating_sub(120) {
+                // Within 2 minutes of end - mark as watched
+                self.library.mark_watched(&show_id, episode_number);
+            } else if pos > 10 {
+                // Only save if they watched more than 10 seconds
+                self.library.update_position(&show_id, episode_number, pos);
+            }
+        } else {
+            // No IPC (not mpv or socket failed) - mark as watched
+            self.library.mark_watched(&show_id, episode_number);
+        }
         self.library.save()?;
 
         Ok(())
@@ -1099,7 +1202,13 @@ impl App {
             } else {
                 None
             };
-            (show.id.clone(), show.title.clone(), episode.number, path, start_pos)
+            (
+                show.id.clone(),
+                show.title.clone(),
+                episode.number,
+                path,
+                start_pos,
+            )
         };
 
         let (play_path, temp_path) = if compression::is_compressed(&path) {
@@ -1111,11 +1220,16 @@ impl App {
         };
 
         let player_cmd = self.config.general.player.clone();
-        
+
         let args = if player_cmd == "vlc" {
-             self.config.player.vlc.as_ref().map(|p| p.args.clone()).unwrap_or_else(|| vec!["--fullscreen".to_string()])
+            self.config
+                .player
+                .vlc
+                .as_ref()
+                .map(|p| p.args.clone())
+                .unwrap_or_else(|| vec!["--fullscreen".to_string()])
         } else {
-             self.config.player.mpv.args.clone()
+            self.config.player.mpv.args.clone()
         };
 
         let mut player = ExternalPlayer::new(player_cmd, args);
@@ -1127,6 +1241,18 @@ impl App {
         }
 
         player.play(&play_path, start_pos)?;
+
+        let mut last_position: Option<u64> = None;
+        let mut last_duration: u64 = 0;
+        while player.is_running() {
+            if let Some(pos) = player.get_position() {
+                last_position = Some(pos);
+            }
+            if let Some(dur) = player.get_duration() {
+                last_duration = dur;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        }
         player.wait()?;
 
         if let Some(rpc) = &mut self.rpc {
@@ -1138,7 +1264,15 @@ impl App {
             }
         }
 
-        self.library.mark_watched(&show_id, episode_number);
+        if let Some(pos) = last_position {
+            if last_duration > 0 && pos > last_duration.saturating_sub(120) {
+                self.library.mark_watched(&show_id, episode_number);
+            } else if pos > 10 {
+                self.library.update_position(&show_id, episode_number, pos);
+            }
+        } else {
+            self.library.mark_watched(&show_id, episode_number);
+        }
         self.library.save()?;
 
         Ok(())
@@ -1148,11 +1282,11 @@ impl App {
         let Some(idx) = self.search_state.selected() else {
             return;
         };
-        
+
         let result_idx = if !self.filtered_search_results.is_empty() {
             *self.filtered_search_results.get(idx).unwrap_or(&idx)
         } else {
-             idx
+            idx
         };
 
         let Some(result) = self.search_results.get(result_idx) else {
@@ -1162,7 +1296,7 @@ impl App {
         if let Some(client) = self.torrent_client.clone() {
             let magnet = result.magnet_link.clone();
             let tx = self.msg_tx.clone();
-            
+
             info!(title = %result.title, "Adding torrent");
 
             tokio::spawn(async move {
@@ -1175,7 +1309,7 @@ impl App {
                     }
                 }
             });
-            
+
             self.view = View::Downloads;
         }
     }
@@ -1194,7 +1328,7 @@ impl App {
         }
 
         let content_path = std::path::Path::new(&torrent.content_path);
-        
+
         let video_path = if content_path.is_file() {
             content_path.to_path_buf()
         } else if content_path.is_dir() {
@@ -1205,10 +1339,15 @@ impl App {
         };
 
         let player_cmd = self.config.general.player.clone();
-         let args = if player_cmd == "vlc" {
-             self.config.player.vlc.as_ref().map(|p| p.args.clone()).unwrap_or_else(|| vec!["--fullscreen".to_string()])
+        let args = if player_cmd == "vlc" {
+            self.config
+                .player
+                .vlc
+                .as_ref()
+                .map(|p| p.args.clone())
+                .unwrap_or_else(|| vec!["--fullscreen".to_string()])
         } else {
-             self.config.player.mpv.args.clone()
+            self.config.player.mpv.args.clone()
         };
 
         let mut player = ExternalPlayer::new(player_cmd, args);
@@ -1273,8 +1412,6 @@ impl App {
             }
         });
     }
-
-
 
     fn refresh_torrent_list(&mut self) {
         let Some(client) = self.torrent_client.clone() else {
@@ -1361,29 +1498,32 @@ impl App {
         }
 
         let original_filename = &self.torrents[idx].name;
-        
+
         // Clean up filename for suggest new show name
         let clean_name = clean_filename(original_filename);
         let media_dirs: Vec<PathBuf> = self.config.expanded_media_dirs();
 
         let original_path = PathBuf::from(&self.torrents[idx].content_path);
-        
+
         info!(
-            "Opening move dialog. Torrent: '{}', Content Path: '{}', Exists: {}", 
-            original_filename, 
-            original_path.display(), 
+            "Opening move dialog. Torrent: '{}', Content Path: '{}', Exists: {}",
+            original_filename,
+            original_path.display(),
             original_path.exists()
         );
-        
+
         if !original_path.exists() {
-            error!("Content path reported by torrent client does NOT exist: {}", original_path.display());
+            error!(
+                "Content path reported by torrent client does NOT exist: {}",
+                original_path.display()
+            );
         }
 
         let batch_analysis = if original_path.is_dir() {
             let analysis = crate::library::batch::analyze_batch(&original_path);
             if analysis.is_batch {
                 info!(
-                    "Detected batch download: {} videos, {} seasons, specials: {}", 
+                    "Detected batch download: {} videos, {} seasons, specials: {}",
                     analysis.total_videos,
                     analysis.seasons.len(),
                     analysis.specials.total_count()
@@ -1418,7 +1558,7 @@ impl App {
             batch_analysis,
             batch_strategy: BatchMoveStrategy::default(),
         };
-        
+
         self.view = View::MoveDialog;
     }
 
@@ -1450,22 +1590,30 @@ impl App {
                         let query = self.tracking_state.input_query.trim().to_string();
                         // Generate ID from query if simple, or just use query as title base
                         let id = crate::library::parser::make_show_id(&query);
-                        
+
                         let series = TrackedSeries {
                             id: id.clone(),
                             title: query.clone(),
                             query: query,
-                            filter_group: if self.tracking_state.input_group.trim().is_empty() { None } else { Some(self.tracking_state.input_group.trim().to_string()) },
-                            filter_quality: if self.tracking_state.input_quality.trim().is_empty() { None } else { Some(self.tracking_state.input_quality.trim().to_string()) },
+                            filter_group: if self.tracking_state.input_group.trim().is_empty() {
+                                None
+                            } else {
+                                Some(self.tracking_state.input_group.trim().to_string())
+                            },
+                            filter_quality: if self.tracking_state.input_quality.trim().is_empty() {
+                                None
+                            } else {
+                                Some(self.tracking_state.input_quality.trim().to_string())
+                            },
                             min_episode: 0,
                             metadata_id: None,
                             cached_metadata: None,
                         };
-                        
+
                         self.library.tracked_shows.push(series);
                         self.library.save()?;
                         self.view = View::Library;
-                        
+
                         // Trigger check immediately?
                         self.check_for_updates();
                     }
@@ -1481,7 +1629,7 @@ impl App {
                 input.pop();
             }
             KeyCode::Char(c) => {
-                 let input = match self.tracking_state.step {
+                let input = match self.tracking_state.step {
                     TrackingDialogStep::Query => &mut self.tracking_state.input_query,
                     TrackingDialogStep::Group => &mut self.tracking_state.input_group,
                     TrackingDialogStep::Quality => &mut self.tracking_state.input_quality,
@@ -1494,15 +1642,19 @@ impl App {
         Ok(())
     }
 
-    fn check_for_updates(&self) { 
+    fn check_for_updates(&self) {
         let library = self.library.clone();
         let client = self.nyaa_client.clone();
         let tx = self.msg_tx.clone();
-        
-        let existing_torrents: Vec<tracking::ExistingTorrent> = self.torrents.iter().map(|t| tracking::ExistingTorrent {
-            hash: t.hash.clone(),
-            name: t.name.clone(),
-        }).collect();
+
+        let existing_torrents: Vec<tracking::ExistingTorrent> = self
+            .torrents
+            .iter()
+            .map(|t| tracking::ExistingTorrent {
+                hash: t.hash.clone(),
+                name: t.name.clone(),
+            })
+            .collect();
 
         tokio::spawn(async move {
             let updates = tracking::check_for_updates(&library, &client, &existing_torrents).await;
@@ -1514,47 +1666,51 @@ impl App {
 
     fn handle_move_dialog_input(&mut self, key: KeyCode) -> Result<()> {
         match self.move_dialog.step {
-            MoveDialogStep::SelectMediaDir => {
-                match key {
-                    KeyCode::Esc => {
-                        self.view = View::Downloads;
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        let len = self.move_dialog.media_dirs.len();
-                        if len > 0 {
-                            let next = self.move_dialog.media_dir_state.selected()
-                                .map(|i| (i + 1).min(len - 1))
-                                .unwrap_or(0);
-                            self.move_dialog.media_dir_state.select(Some(next));
-                        }
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        let next = self.move_dialog.media_dir_state.selected()
-                            .map(|i| i.saturating_sub(1))
+            MoveDialogStep::SelectMediaDir => match key {
+                KeyCode::Esc => {
+                    self.view = View::Downloads;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let len = self.move_dialog.media_dirs.len();
+                    if len > 0 {
+                        let next = self
+                            .move_dialog
+                            .media_dir_state
+                            .selected()
+                            .map(|i| (i + 1).min(len - 1))
                             .unwrap_or(0);
                         self.move_dialog.media_dir_state.select(Some(next));
                     }
-                    KeyCode::Enter => {
-                        if let Some(idx) = self.move_dialog.media_dir_state.selected() {
-                            if let Some(dir) = self.move_dialog.media_dirs.get(idx).cloned() {
-                                self.move_dialog.selected_media_dir = Some(dir.clone());
-                                
-                                let mut shows = list_subdirs(&dir);
-                                shows.sort();
-                                self.move_dialog.shows_in_dir = shows;
-                                
-                                self.move_dialog.show_state = ListState::default();
-                                if !self.move_dialog.shows_in_dir.is_empty() {
-                                    self.move_dialog.show_state.select(Some(0));
-                                }
-                                
-                                self.move_dialog.step = MoveDialogStep::SelectShow;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    let next = self
+                        .move_dialog
+                        .media_dir_state
+                        .selected()
+                        .map(|i| i.saturating_sub(1))
+                        .unwrap_or(0);
+                    self.move_dialog.media_dir_state.select(Some(next));
+                }
+                KeyCode::Enter => {
+                    if let Some(idx) = self.move_dialog.media_dir_state.selected() {
+                        if let Some(dir) = self.move_dialog.media_dirs.get(idx).cloned() {
+                            self.move_dialog.selected_media_dir = Some(dir.clone());
+
+                            let mut shows = list_subdirs(&dir);
+                            shows.sort();
+                            self.move_dialog.shows_in_dir = shows;
+
+                            self.move_dialog.show_state = ListState::default();
+                            if !self.move_dialog.shows_in_dir.is_empty() {
+                                self.move_dialog.show_state.select(Some(0));
                             }
+
+                            self.move_dialog.step = MoveDialogStep::SelectShow;
                         }
                     }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
             MoveDialogStep::SelectShow => {
                 if self.move_dialog.creating_new {
                     match key {
@@ -1564,7 +1720,8 @@ impl App {
                         }
                         KeyCode::Enter => {
                             if !self.move_dialog.new_show_name.is_empty() {
-                                self.move_dialog.selected_show = Some(self.move_dialog.new_show_name.clone());
+                                self.move_dialog.selected_show =
+                                    Some(self.move_dialog.new_show_name.clone());
                                 self.move_dialog.creating_new = false;
                                 if self.move_dialog.batch_analysis.is_some() {
                                     self.move_dialog.step = MoveDialogStep::BatchPreview;
@@ -1591,14 +1748,20 @@ impl App {
                         KeyCode::Char('j') | KeyCode::Down => {
                             let len = self.move_dialog.shows_in_dir.len();
                             if len > 0 {
-                                let next = self.move_dialog.show_state.selected()
+                                let next = self
+                                    .move_dialog
+                                    .show_state
+                                    .selected()
                                     .map(|i| (i + 1).min(len - 1))
                                     .unwrap_or(0);
                                 self.move_dialog.show_state.select(Some(next));
                             }
                         }
                         KeyCode::Char('k') | KeyCode::Up => {
-                            let next = self.move_dialog.show_state.selected()
+                            let next = self
+                                .move_dialog
+                                .show_state
+                                .selected()
                                 .map(|i| i.saturating_sub(1))
                                 .unwrap_or(0);
                             self.move_dialog.show_state.select(Some(next));
@@ -1609,7 +1772,8 @@ impl App {
                         }
                         KeyCode::Enter => {
                             if let Some(idx) = self.move_dialog.show_state.selected() {
-                                if let Some(show) = self.move_dialog.shows_in_dir.get(idx).cloned() {
+                                if let Some(show) = self.move_dialog.shows_in_dir.get(idx).cloned()
+                                {
                                     self.move_dialog.selected_show = Some(show);
                                     if self.move_dialog.batch_analysis.is_some() {
                                         self.move_dialog.step = MoveDialogStep::BatchPreview;
@@ -1623,41 +1787,43 @@ impl App {
                     }
                 }
             }
-            MoveDialogStep::BatchPreview => {
-                match key {
-                    KeyCode::Esc => {
-                        self.move_dialog.step = MoveDialogStep::SelectShow;
-                    }
-                    KeyCode::Tab | KeyCode::Char('s') => {
-                        self.move_dialog.batch_strategy = self.move_dialog.batch_strategy.next();
-                    }
-                    KeyCode::Enter => {
-                        if let Err(e) = self.execute_batch_move() {
-                            error!("Failed to move batch: {}. Source may have been deleted or is in use.", e);
-                        }
-                    }
-                    _ => {}
+            MoveDialogStep::BatchPreview => match key {
+                KeyCode::Esc => {
+                    self.move_dialog.step = MoveDialogStep::SelectShow;
                 }
-            }
-            MoveDialogStep::EditFilename => {
-                match key {
-                    KeyCode::Esc => {
-                        self.move_dialog.step = MoveDialogStep::SelectShow;
-                    }
-                    KeyCode::Enter => {
-                        if let Err(e) = self.execute_move() {
-                            error!("Failed to move file: {}. Source may have been deleted or is in use.", e);
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        self.move_dialog.filename.pop();
-                    }
-                    KeyCode::Char(c) => {
-                        self.move_dialog.filename.push(c);
-                    }
-                    _ => {}
+                KeyCode::Tab | KeyCode::Char('s') => {
+                    self.move_dialog.batch_strategy = self.move_dialog.batch_strategy.next();
                 }
-            }
+                KeyCode::Enter => {
+                    if let Err(e) = self.execute_batch_move() {
+                        error!(
+                            "Failed to move batch: {}. Source may have been deleted or is in use.",
+                            e
+                        );
+                    }
+                }
+                _ => {}
+            },
+            MoveDialogStep::EditFilename => match key {
+                KeyCode::Esc => {
+                    self.move_dialog.step = MoveDialogStep::SelectShow;
+                }
+                KeyCode::Enter => {
+                    if let Err(e) = self.execute_move() {
+                        error!(
+                            "Failed to move file: {}. Source may have been deleted or is in use.",
+                            e
+                        );
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.move_dialog.filename.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.move_dialog.filename.push(c);
+                }
+                _ => {}
+            },
         }
         Ok(())
     }
@@ -1671,11 +1837,12 @@ impl App {
         };
 
         let area = frame.area();
-        
+
         let is_batch_preview = self.move_dialog.step == MoveDialogStep::BatchPreview;
         let dialog_width = if is_batch_preview { 70 } else { 60 }.min(area.width.saturating_sub(4));
-        let dialog_height = if is_batch_preview { 20 } else { 15 }.min(area.height.saturating_sub(4));
-        
+        let dialog_height =
+            if is_batch_preview { 20 } else { 15 }.min(area.height.saturating_sub(4));
+
         let horizontal = Layout::horizontal([Constraint::Length(dialog_width)]).flex(Flex::Center);
         let vertical = Layout::vertical([Constraint::Length(dialog_height)]).flex(Flex::Center);
         let [dialog_area] = vertical.areas(area);
@@ -1706,29 +1873,40 @@ impl App {
 
         match self.move_dialog.step {
             MoveDialogStep::SelectMediaDir => {
-                let items: Vec<ListItem> = self.move_dialog.media_dirs
+                let items: Vec<ListItem> = self
+                    .move_dialog
+                    .media_dirs
                     .iter()
                     .map(|p| ListItem::new(p.display().to_string()))
                     .collect();
 
                 let list = List::new(items)
-                    .highlight_style(Style::default().fg(self.accent).add_modifier(Modifier::BOLD))
+                    .highlight_style(
+                        Style::default()
+                            .fg(self.accent)
+                            .add_modifier(Modifier::BOLD),
+                    )
                     .highlight_symbol("> ");
 
-                frame.render_stateful_widget(list, inner, &mut self.move_dialog.media_dir_state.clone());
+                frame.render_stateful_widget(
+                    list,
+                    inner,
+                    &mut self.move_dialog.media_dir_state.clone(),
+                );
             }
             MoveDialogStep::SelectShow => {
                 if self.move_dialog.creating_new {
                     let input_text = format!("> {}_", self.move_dialog.new_show_name);
-                    let para = Paragraph::new(input_text)
-                        .style(Style::default().fg(self.accent));
+                    let para = Paragraph::new(input_text).style(Style::default().fg(self.accent));
                     frame.render_widget(para, inner);
                 } else {
-                    let mut items: Vec<ListItem> = self.move_dialog.shows_in_dir
+                    let mut items: Vec<ListItem> = self
+                        .move_dialog
+                        .shows_in_dir
                         .iter()
                         .map(|s| ListItem::new(format!("  {}/", s)))
                         .collect();
-                    
+
                     if items.is_empty() {
                         items.push(ListItem::new(Line::from(vec![
                             Span::styled("(empty - press ", Style::default().fg(Color::DarkGray)),
@@ -1738,15 +1916,33 @@ impl App {
                     }
 
                     let list = List::new(items)
-                        .highlight_style(Style::default().fg(self.accent).add_modifier(Modifier::BOLD))
+                        .highlight_style(
+                            Style::default()
+                                .fg(self.accent)
+                                .add_modifier(Modifier::BOLD),
+                        )
                         .highlight_symbol("> ");
 
-                    frame.render_stateful_widget(list, inner, &mut self.move_dialog.show_state.clone());
+                    frame.render_stateful_widget(
+                        list,
+                        inner,
+                        &mut self.move_dialog.show_state.clone(),
+                    );
                 }
             }
             MoveDialogStep::BatchPreview => {
-                let dest_path = self.move_dialog.selected_media_dir.as_ref()
-                    .map(|p| p.join(self.move_dialog.selected_show.as_ref().unwrap_or(&String::new())))
+                let dest_path = self
+                    .move_dialog
+                    .selected_media_dir
+                    .as_ref()
+                    .map(|p| {
+                        p.join(
+                            self.move_dialog
+                                .selected_show
+                                .as_ref()
+                                .unwrap_or(&String::new()),
+                        )
+                    })
                     .unwrap_or_default();
 
                 let mut lines = vec![
@@ -1755,9 +1951,12 @@ impl App {
                         Span::raw(dest_path.display().to_string()),
                     ]),
                     Line::from(""),
-                    Line::from(vec![
-                        Span::styled("Batch detected! ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                    ]),
+                    Line::from(vec![Span::styled(
+                        "Batch detected! ",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )]),
                 ];
 
                 if let Some(ref analysis) = self.move_dialog.batch_analysis {
@@ -1768,26 +1967,31 @@ impl App {
                     lines.push(Line::from(""));
 
                     if !analysis.seasons.is_empty() {
-                        lines.push(Line::from(vec![
-                            Span::styled("Seasons:", Style::default().fg(Color::Cyan)),
-                        ]));
+                        lines.push(Line::from(vec![Span::styled(
+                            "Seasons:",
+                            Style::default().fg(Color::Cyan),
+                        )]));
                         for season in &analysis.seasons {
-                            lines.push(Line::from(vec![
-                                Span::raw(format!("  {} - {} episode(s)", season.folder_name, season.episodes.len())),
-                            ]));
+                            lines.push(Line::from(vec![Span::raw(format!(
+                                "  {} - {} episode(s)",
+                                season.folder_name,
+                                season.episodes.len()
+                            ))]));
                         }
                     }
 
                     if !analysis.specials.is_empty() {
-                        lines.push(Line::from(vec![
-                            Span::styled(format!("Specials: {} file(s)", analysis.specials.total_count()), Style::default().fg(Color::Magenta)),
-                        ]));
+                        lines.push(Line::from(vec![Span::styled(
+                            format!("Specials: {} file(s)", analysis.specials.total_count()),
+                            Style::default().fg(Color::Magenta),
+                        )]));
                     }
 
                     if !analysis.loose_episodes.is_empty() {
-                        lines.push(Line::from(vec![
-                            Span::styled(format!("Loose episodes: {}", analysis.loose_episodes.len()), Style::default().fg(Color::DarkGray)),
-                        ]));
+                        lines.push(Line::from(vec![Span::styled(
+                            format!("Loose episodes: {}", analysis.loose_episodes.len()),
+                            Style::default().fg(Color::DarkGray),
+                        )]));
                     }
                 }
 
@@ -1796,21 +2000,37 @@ impl App {
                     Span::styled("Strategy: ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
                         format!("[{}]", self.move_dialog.batch_strategy.as_str()),
-                        Style::default().fg(self.accent).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(self.accent)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(" (Tab or 's' to change)", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        " (Tab or 's' to change)",
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
                 lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled("Press Enter to move, Esc to go back", Style::default().fg(Color::DarkGray)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    "Press Enter to move, Esc to go back",
+                    Style::default().fg(Color::DarkGray),
+                )]));
 
                 let para = Paragraph::new(lines);
                 frame.render_widget(para, inner);
             }
             MoveDialogStep::EditFilename => {
-                let dest_path = self.move_dialog.selected_media_dir.as_ref()
-                    .map(|p| p.join(self.move_dialog.selected_show.as_ref().unwrap_or(&String::new())))
+                let dest_path = self
+                    .move_dialog
+                    .selected_media_dir
+                    .as_ref()
+                    .map(|p| {
+                        p.join(
+                            self.move_dialog
+                                .selected_show
+                                .as_ref()
+                                .unwrap_or(&String::new()),
+                        )
+                    })
                     .unwrap_or_default();
 
                 let lines = vec![
@@ -1819,16 +2039,19 @@ impl App {
                         Span::raw(dest_path.display().to_string()),
                     ]),
                     Line::from(""),
-                    Line::from(vec![
-                        Span::styled("Filename: ", Style::default().fg(Color::DarkGray)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(format!("{}_", self.move_dialog.filename), Style::default().fg(self.accent)),
-                    ]),
+                    Line::from(vec![Span::styled(
+                        "Filename: ",
+                        Style::default().fg(Color::DarkGray),
+                    )]),
+                    Line::from(vec![Span::styled(
+                        format!("{}_", self.move_dialog.filename),
+                        Style::default().fg(self.accent),
+                    )]),
                     Line::from(""),
-                    Line::from(vec![
-                        Span::styled("Press Enter to confirm, Esc to go back", Style::default().fg(Color::DarkGray)),
-                    ]),
+                    Line::from(vec![Span::styled(
+                        "Press Enter to confirm, Esc to go back",
+                        Style::default().fg(Color::DarkGray),
+                    )]),
                 ];
 
                 let para = Paragraph::new(lines);
@@ -1846,7 +2069,7 @@ impl App {
         };
 
         let dest_dir = media_dir.join(show_name);
-        
+
         if !dest_dir.exists() {
             std::fs::create_dir_all(&dest_dir)?;
         }
@@ -1862,7 +2085,11 @@ impl App {
                     p
                 }
                 Err(e) => {
-                    error!("Failed to find video in dir {}: {}", source_path.display(), e);
+                    error!(
+                        "Failed to find video in dir {}: {}",
+                        source_path.display(),
+                        e
+                    );
                     return Err(e);
                 }
             }
@@ -1872,21 +2099,36 @@ impl App {
         };
 
         if !real_source_path.exists() {
-             error!("CRITICAL: Source file DOES NOT EXIST at moment of move: {}", real_source_path.display());
-             if let Some(parent) = real_source_path.parent() {
-                 if let Ok(entries) = std::fs::read_dir(parent) {
-                     let file_list: Vec<String> = entries
+            error!(
+                "CRITICAL: Source file DOES NOT EXIST at moment of move: {}",
+                real_source_path.display()
+            );
+            if let Some(parent) = real_source_path.parent() {
+                if let Ok(entries) = std::fs::read_dir(parent) {
+                    let file_list: Vec<String> = entries
                         .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
                         .collect();
-                     error!("Parent dir content for {}: {:?}", parent.display(), file_list);
-                 } else {
-                     error!("Could not read parent dir: {}", parent.display());
-                 }
-             }
+                    error!(
+                        "Parent dir content for {}: {:?}",
+                        parent.display(),
+                        file_list
+                    );
+                } else {
+                    error!("Could not read parent dir: {}", parent.display());
+                }
+            }
         } else {
-            info!("Source file CONFIRMED exists: {}", real_source_path.display());
+            info!(
+                "Source file CONFIRMED exists: {}",
+                real_source_path.display()
+            );
             if let Ok(meta) = std::fs::metadata(&real_source_path) {
-                info!("Source metadata: is_file={}, len={}, permissions={:?}", meta.is_file(), meta.len(), meta.permissions());
+                info!(
+                    "Source metadata: is_file={}, len={}, permissions={:?}",
+                    meta.is_file(),
+                    meta.len(),
+                    meta.permissions()
+                );
             }
         }
 
@@ -1906,17 +2148,17 @@ impl App {
         }
 
         if let Some(client) = self.torrent_client.clone() {
-             if let Some(torrent) = self.torrents.get(self.move_dialog.torrent_idx) {
-                  let hash = torrent.hash.clone();
-                  let name = torrent.name.clone();
-                  let tx = self.msg_tx.clone();
-                  tokio::spawn(async move {
-                      info!("Removing moved torrent from client: {}", name);
-                      if let Err(e) = client.remove(&hash, false).await {
-                           let _ = tx.send(AppMessage::TorrentError(e.to_string()));
-                      }
-                  });
-             }
+            if let Some(torrent) = self.torrents.get(self.move_dialog.torrent_idx) {
+                let hash = torrent.hash.clone();
+                let name = torrent.name.clone();
+                let tx = self.msg_tx.clone();
+                tokio::spawn(async move {
+                    info!("Removing moved torrent from client: {}", name);
+                    if let Err(e) = client.remove(&hash, false).await {
+                        let _ = tx.send(AppMessage::TorrentError(e.to_string()));
+                    }
+                });
+            }
         }
 
         self.refresh_library()?;
@@ -1991,17 +2233,27 @@ impl App {
         self.walk_and_move_recursive(src, dest, src, false)?;
         Ok(())
     }
-    fn walk_and_move_recursive(&self, current: &Path, dest: &Path, root: &Path, preserve_structure: bool) -> Result<()> {
+    fn walk_and_move_recursive(
+        &self,
+        current: &Path,
+        dest: &Path,
+        root: &Path,
+        preserve_structure: bool,
+    ) -> Result<()> {
         let entries = std::fs::read_dir(current)?;
-        
+
         for entry in entries.filter_map(|e| e.ok()) {
             let entry_path = entry.path();
-            
+
             if entry_path.is_dir() {
                 self.walk_and_move_recursive(&entry_path, dest, root, preserve_structure)?;
             } else if entry_path.is_file() {
-                let filename = entry_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                
+                let filename = entry_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+
                 if crate::library::parser::is_video_file(&filename) {
                     let dest_path = if preserve_structure {
                         let relative = entry_path.strip_prefix(root).unwrap_or(&entry_path);
@@ -2013,8 +2265,14 @@ impl App {
                     } else {
                         let base_path = dest.join(&filename);
                         if base_path.exists() {
-                            let stem = Path::new(&filename).file_stem().unwrap_or_default().to_string_lossy();
-                            let ext = Path::new(&filename).extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+                            let stem = Path::new(&filename)
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy();
+                            let ext = Path::new(&filename)
+                                .extension()
+                                .map(|e| e.to_string_lossy().to_string())
+                                .unwrap_or_default();
                             let mut counter = 1;
                             loop {
                                 let new_name = format!("{}_{}.{}", stem, counter, ext);
@@ -2047,10 +2305,10 @@ impl App {
 
     fn compress_videos_recursive(&self, dir: &Path) -> Result<()> {
         let entries = std::fs::read_dir(dir)?;
-        
+
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
-            
+
             if path.is_dir() {
                 self.compress_videos_recursive(&path)?;
             } else if path.is_file() {
@@ -2064,10 +2322,10 @@ impl App {
         Ok(())
     }
     fn render_tracking_dialog(&self, frame: &mut Frame) {
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
         use ratatui::layout::{Constraint, Layout, Rect};
-        use ratatui::text::{Line, Text};
         use ratatui::style::Style;
+        use ratatui::text::{Line, Text};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
         let area = frame.area();
         let dialog_area = Rect {
@@ -2078,41 +2336,71 @@ impl App {
         };
 
         frame.render_widget(Clear, dialog_area);
-        
+
         let block = Block::default()
             .title(" Track New Series ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.accent));
-        
+
         let inner_area = block.inner(dialog_area);
         frame.render_widget(block, dialog_area);
 
         let layout = Layout::default()
-            .constraints([Constraint::Length(2), Constraint::Length(3), Constraint::Min(1)])
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Length(3),
+                Constraint::Min(1),
+            ])
             .split(inner_area);
 
         let (step_text, input_text) = match self.tracking_state.step {
-            TrackingDialogStep::Query => ("Step 1/3: Enter Search Query (e.g. 'Fate Strange Fake')", self.tracking_state.input_query.as_str()),
-            TrackingDialogStep::Group => ("Step 2/3: Enter Release Group Filter (Optional)", self.tracking_state.input_group.as_str()),
-            TrackingDialogStep::Quality => ("Step 3/3: Enter Quality Filter (Optional)", self.tracking_state.input_quality.as_str()),
+            TrackingDialogStep::Query => (
+                "Step 1/3: Enter Search Query (e.g. 'Fate Strange Fake')",
+                self.tracking_state.input_query.as_str(),
+            ),
+            TrackingDialogStep::Group => (
+                "Step 2/3: Enter Release Group Filter (Optional)",
+                self.tracking_state.input_group.as_str(),
+            ),
+            TrackingDialogStep::Quality => (
+                "Step 3/3: Enter Quality Filter (Optional)",
+                self.tracking_state.input_quality.as_str(),
+            ),
             TrackingDialogStep::Confirm => ("Adding series...", ""),
         };
 
-        frame.render_widget(Paragraph::new(step_text).style(Style::default().fg(Color::Cyan)), layout[0]);
-        
+        frame.render_widget(
+            Paragraph::new(step_text).style(Style::default().fg(Color::Cyan)),
+            layout[0],
+        );
+
         frame.render_widget(
             Paragraph::new(format!("> {}", input_text))
                 .style(Style::default().fg(Color::White))
-                .block(Block::default().borders(Borders::BOTTOM)), 
-            layout[1]
+                .block(Block::default().borders(Borders::BOTTOM)),
+            layout[1],
         );
-        
-        if !self.tracking_state.input_group.is_empty() || !self.tracking_state.input_quality.is_empty() {
-             let summary = format!("Group: {}, Quality: {}", 
-                if self.tracking_state.input_group.is_empty() { "Any" } else { &self.tracking_state.input_group },
-                if self.tracking_state.input_quality.is_empty() { "Any" } else { &self.tracking_state.input_quality }
-             );
-             frame.render_widget(Paragraph::new(summary).style(Style::default().fg(Color::DarkGray)), layout[2]);
+
+        if !self.tracking_state.input_group.is_empty()
+            || !self.tracking_state.input_quality.is_empty()
+        {
+            let summary = format!(
+                "Group: {}, Quality: {}",
+                if self.tracking_state.input_group.is_empty() {
+                    "Any"
+                } else {
+                    &self.tracking_state.input_group
+                },
+                if self.tracking_state.input_quality.is_empty() {
+                    "Any"
+                } else {
+                    &self.tracking_state.input_quality
+                }
+            );
+            frame.render_widget(
+                Paragraph::new(summary).style(Style::default().fg(Color::DarkGray)),
+                layout[2],
+            );
         }
     }
 
@@ -2120,7 +2408,7 @@ impl App {
         if let Some(cmd) = &self.config.torrent.managed_daemon_command {
             info!("Launching managed daemon: {}", cmd);
             let mut command = std::process::Command::new(cmd);
-            
+
             if let Some(args) = &self.config.torrent.managed_daemon_args {
                 command.args(args);
             }
@@ -2141,11 +2429,9 @@ impl App {
     fn cleanup(&mut self) {
         if let Some(mut child) = self.managed_daemon_handle.take() {
             info!("Stopping managed daemon (PID: {})", child.id());
-            
+
             let pid = child.id().to_string();
-            let _ = std::process::Command::new("kill")
-                .arg(&pid)
-                .output();
+            let _ = std::process::Command::new("kill").arg(&pid).output();
         }
     }
 
@@ -2176,56 +2462,52 @@ impl App {
             }
         }
     }
-    
+
     fn handle_delete_dialog_input(&mut self, key: KeyCode) -> Result<()> {
         match key {
-            KeyCode::Esc => {
-                match self.delete_dialog_state.target {
-                    DeleteTarget::Show(_) => self.view = View::Library,
-                    DeleteTarget::Episode(_, _) => self.view = View::Episodes,
-                }
-            }
-            KeyCode::Enter => {
-                match self.delete_dialog_state.target {
-                    DeleteTarget::Show(idx) => {
-                        if let Some(show) = self.library.shows.get(idx) {
-                             info!("Deleting show: {}", show.title);
-                             if show.path.exists() {
-                                 std::fs::remove_dir_all(&show.path)?;
-                             }
-                             self.library.shows.remove(idx);
-                             self.library.save()?;
+            KeyCode::Esc => match self.delete_dialog_state.target {
+                DeleteTarget::Show(_) => self.view = View::Library,
+                DeleteTarget::Episode(_, _) => self.view = View::Episodes,
+            },
+            KeyCode::Enter => match self.delete_dialog_state.target {
+                DeleteTarget::Show(idx) => {
+                    if let Some(show) = self.library.shows.get(idx) {
+                        info!("Deleting show: {}", show.title);
+                        if show.path.exists() {
+                            std::fs::remove_dir_all(&show.path)?;
                         }
-                        self.view = View::Library;
-                        self.library_state.select(None); 
+                        self.library.shows.remove(idx);
+                        self.library.save()?;
                     }
-                    DeleteTarget::Episode(show_idx, ep_idx) => {
-                         if let Some(show) = self.library.shows.get_mut(show_idx) {
-                             if let Some(ep) = show.episodes.get(ep_idx) {
-                                  let path = ep.full_path(&show.path);
-                                  info!("Deleting episode file: {:?}", path);
-                                  if path.exists() {
-                                      std::fs::remove_file(path)?;
-                                  }
-                                  show.episodes.remove(ep_idx);
-                             }
-                             self.library.save()?;
-                         }
-                         self.view = View::Episodes;
-                         self.episodes_state.select(None);
-                    }
+                    self.view = View::Library;
+                    self.library_state.select(None);
                 }
-            }
+                DeleteTarget::Episode(show_idx, ep_idx) => {
+                    if let Some(show) = self.library.shows.get_mut(show_idx) {
+                        if let Some(ep) = show.episodes.get(ep_idx) {
+                            let path = ep.full_path(&show.path);
+                            info!("Deleting episode file: {:?}", path);
+                            if path.exists() {
+                                std::fs::remove_file(path)?;
+                            }
+                            show.episodes.remove(ep_idx);
+                        }
+                        self.library.save()?;
+                    }
+                    self.view = View::Episodes;
+                    self.episodes_state.select(None);
+                }
+            },
             _ => {}
         }
         Ok(())
     }
 
     fn render_delete_dialog(&self, frame: &mut Frame) {
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
         use ratatui::layout::{Alignment, Rect};
-        use ratatui::style::{Color, Style, Modifier};
+        use ratatui::style::{Color, Modifier, Style};
         use ratatui::text::{Line, Text};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
         let area = frame.area();
         let dialog_area = Rect {
@@ -2236,26 +2518,25 @@ impl App {
         };
 
         frame.render_widget(Clear, dialog_area);
-        
+
         let block = Block::default()
             .title(" Confirm Deletion ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Red));
-            
+
         let inner_area = block.inner(dialog_area);
         frame.render_widget(block, dialog_area);
-        
+
         let text = Text::from(vec![
-            Line::from(vec![
-                "Are you sure you want to delete:".into(),
-            ]),
-            Line::from(vec![
-                 ratatui::text::Span::styled(&self.delete_dialog_state.name, Style::default().add_modifier(Modifier::BOLD).fg(Color::Red)),
-            ]),
+            Line::from(vec!["Are you sure you want to delete:".into()]),
+            Line::from(vec![ratatui::text::Span::styled(
+                &self.delete_dialog_state.name,
+                Style::default().add_modifier(Modifier::BOLD).fg(Color::Red),
+            )]),
             Line::from(""),
             Line::from("This action cannot be undone."),
         ]);
-        
+
         let para = Paragraph::new(text).alignment(Alignment::Center);
         frame.render_widget(para, inner_area);
     }
@@ -2269,10 +2550,10 @@ impl App {
     }
 
     fn render_help(&self, frame: &mut Frame) {
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Table, Row};
         use ratatui::layout::{Constraint, Layout, Rect};
-        use ratatui::style::{Color, Style, Modifier};
+        use ratatui::style::{Color, Modifier, Style};
         use ratatui::text::{Line, Text};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table};
 
         let area = frame.area();
         let dialog_area = Rect {
@@ -2283,12 +2564,12 @@ impl App {
         };
 
         frame.render_widget(Clear, dialog_area);
-        
+
         let block = Block::default()
             .title(" Help ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.accent));
-            
+
         let inner = block.inner(dialog_area);
         frame.render_widget(block, dialog_area);
 
@@ -2312,14 +2593,23 @@ impl App {
             Row::new(vec!["", "m", "Move to Library"]),
         ];
 
-        let table = Table::new(rows, &[
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(60),
-        ])
-        .header(Row::new(vec!["Context", "Key", "Action"]).style(Style::default().add_modifier(Modifier::BOLD).fg(self.accent)))
+        let table = Table::new(
+            rows,
+            &[
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+                Constraint::Percentage(60),
+            ],
+        )
+        .header(
+            Row::new(vec!["Context", "Key", "Action"]).style(
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(self.accent),
+            ),
+        )
         .block(Block::default().borders(Borders::NONE));
-        
+
         frame.render_widget(table, inner);
     }
 
@@ -2334,21 +2624,25 @@ impl App {
     }
 
     fn handle_tracking_list_input(&mut self, key: KeyCode) -> Result<()> {
-         match key {
+        match key {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('T') => {
                 self.view = View::Library;
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 let len = self.library.tracked_shows.len();
                 if len > 0 {
-                    let next = self.tracking_list_state.selected()
+                    let next = self
+                        .tracking_list_state
+                        .selected()
                         .map(|i| (i + 1).min(len - 1))
                         .unwrap_or(0);
                     self.tracking_list_state.select(Some(next));
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                let next = self.tracking_list_state.selected()
+                let next = self
+                    .tracking_list_state
+                    .selected()
                     .map(|i| i.saturating_sub(1))
                     .unwrap_or(0);
                 self.tracking_list_state.select(Some(next));
@@ -2359,7 +2653,7 @@ impl App {
                         self.library.tracked_shows.remove(idx);
                         self.library.save()?;
                         // Adjust selection
-                        let len = self.library.tracked_shows.len(); 
+                        let len = self.library.tracked_shows.len();
                         if len == 0 {
                             self.tracking_list_state.select(None);
                         } else if idx >= len {
@@ -2368,16 +2662,19 @@ impl App {
                     }
                 }
             }
-             _ => {}
-         }
-         Ok(())
+            _ => {}
+        }
+        Ok(())
     }
 
     fn render_tracking_list(&mut self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        use ratatui::style::{Color, Modifier, Style};
         use ratatui::widgets::{Block, Borders, List, ListItem};
-        use ratatui::style::{Style, Modifier, Color};
 
-        let items: Vec<ListItem> = self.library.tracked_shows.iter()
+        let items: Vec<ListItem> = self
+            .library
+            .tracked_shows
+            .iter()
             .map(|s| {
                 let title = format!("{} (Query: {})", s.title, s.query);
                 ListItem::new(title)
@@ -2385,8 +2682,17 @@ impl App {
             .collect();
 
         let list = List::new(items)
-            .block(Block::default().title(" Tracked Shows ").borders(Borders::ALL).border_style(Style::default().fg(self.accent)))
-            .highlight_style(Style::default().fg(self.accent).add_modifier(Modifier::BOLD))
+            .block(
+                Block::default()
+                    .title(" Tracked Shows ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.accent)),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(self.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("> ");
 
         frame.render_stateful_widget(list, area, &mut self.tracking_list_state);
@@ -2484,21 +2790,21 @@ pub fn play_splash(terminal: &mut DefaultTerminal, accent: Color) -> io::Result<
         terminal.draw(|f| {
             let area = f.area();
             let text = Text::styled(*frame, Style::default().fg(accent));
-            
+
             let lines = frame.lines().count() as u16;
             let y_offset = area.height.saturating_sub(lines) / 2;
-            
+
             let centered_area = Rect {
                 x: 0,
                 y: y_offset,
                 width: area.width,
                 height: lines + 2,
             };
-            
+
             let para = Paragraph::new(text).alignment(Alignment::Center);
             f.render_widget(para, centered_area);
         })?;
-        
+
         thread::sleep(Duration::from_millis(150));
     }
 
@@ -2507,26 +2813,29 @@ pub fn play_splash(terminal: &mut DefaultTerminal, accent: Color) -> io::Result<
         let frame_text = MIRU_FRAMES[3];
         let lines = frame_text.lines().count() as u16;
         let y_offset = area.height.saturating_sub(lines + 2) / 2;
-        
+
         let logo_area = Rect {
             x: 0,
             y: y_offset,
             width: area.width,
             height: lines,
         };
-        
+
         let tagline_area = Rect {
             x: 0,
             y: y_offset + lines,
             width: area.width,
             height: 2,
         };
-        
+
         let logo = Paragraph::new(Text::styled(frame_text, Style::default().fg(accent)))
             .alignment(Alignment::Center);
-        let tagline = Paragraph::new(Line::styled(MIRU_TAGLINE, Style::default().fg(Color::DarkGray)))
-            .alignment(Alignment::Center);
-        
+        let tagline = Paragraph::new(Line::styled(
+            MIRU_TAGLINE,
+            Style::default().fg(Color::DarkGray),
+        ))
+        .alignment(Alignment::Center);
+
         f.render_widget(logo, logo_area);
         f.render_widget(tagline, tagline_area);
     })?;
@@ -2539,19 +2848,19 @@ pub fn play_splash(terminal: &mut DefaultTerminal, accent: Color) -> io::Result<
             let frame_text = MIRU_FRAMES[i];
             let lines = frame_text.lines().count() as u16;
             let y_offset = area.height.saturating_sub(lines) / 2;
-            
+
             let centered_area = Rect {
                 x: 0,
                 y: y_offset,
                 width: area.width,
                 height: lines + 2,
             };
-            
+
             let para = Paragraph::new(Text::styled(frame_text, Style::default().fg(accent)))
                 .alignment(Alignment::Center);
             f.render_widget(para, centered_area);
         })?;
-        
+
         thread::sleep(Duration::from_millis(80));
     }
 

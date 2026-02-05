@@ -3,12 +3,14 @@ use std::process::{Child, Command, Stdio};
 
 use tracing::{debug, info, warn};
 
+use super::ipc::{MpvIpc, generate_socket_path};
 use crate::error::{Error, Result};
 
 pub struct ExternalPlayer {
     command: String,
     args: Vec<String>,
     child: Option<Child>,
+    ipc: Option<MpvIpc>,
 }
 
 impl ExternalPlayer {
@@ -17,7 +19,12 @@ impl ExternalPlayer {
             command,
             args,
             child: None,
+            ipc: None,
         }
+    }
+
+    fn is_mpv(&self) -> bool {
+        self.command.to_lowercase().contains("mpv")
     }
 
     pub fn play(&mut self, path: &Path, start_position: Option<u64>) -> Result<()> {
@@ -31,9 +38,17 @@ impl ExternalPlayer {
             cmd.arg(arg);
         }
 
+        // mpv IPC socket for position tracking
+        if self.is_mpv() {
+            let socket_path = generate_socket_path();
+            cmd.arg(format!("--input-ipc-server={}", socket_path.display()));
+            self.ipc = Some(MpvIpc::new(socket_path));
+            debug!("mpv IPC socket enabled");
+        }
+
         if let Some(pos) = start_position {
             if pos > 0 {
-                if self.command.contains("mpv") {
+                if self.is_mpv() {
                     cmd.arg(format!("--start={}", pos));
                 } else if self.command.contains("vlc") {
                     cmd.arg(format!("--start-time={}", pos));
@@ -64,10 +79,19 @@ impl ExternalPlayer {
         Ok(())
     }
 
+    pub fn get_position(&self) -> Option<u64> {
+        self.ipc.as_ref().and_then(|ipc| ipc.get_time_pos())
+    }
+
+    pub fn get_duration(&self) -> Option<u64> {
+        self.ipc.as_ref().and_then(|ipc| ipc.get_duration())
+    }
+
     pub fn wait(&mut self) -> Result<bool> {
         if let Some(ref mut child) = self.child {
             let status = child.wait()?;
             self.child = None;
+            self.ipc = None;
             Ok(status.success())
         } else {
             Ok(true)
