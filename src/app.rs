@@ -26,6 +26,7 @@ use crate::nyaa::{NyaaCategory, NyaaClient, NyaaFilter, NyaaResult, NyaaSort};
 use crate::player::ExternalPlayer;
 use crate::rpc::DiscordRpc;
 use crate::torrent::{AnyTorrentClient, QBittorrentClient, TorrentStatus, TransmissionClient};
+use crate::torrent::preview::{PreviewState, PreviewSection, TorrentFileEntry, fetch_torrent_files, extract_anime_title};
 use crate::ui::{
     render_downloads_view, render_episodes_view, render_library_view, render_search_view, widgets,
 };
@@ -207,6 +208,7 @@ pub enum View {
     DeleteDialog,
     Help,
     TrackingList,
+    PreviewPopup,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -308,6 +310,10 @@ pub enum AppMessage {
     TorrentList(Vec<TorrentStatus>),
     UpdatesFound(Vec<UpdateResult>),
     AutoSave,
+    PreviewTorrentData(Vec<TorrentFileEntry>),
+    PreviewTorrentError(String),
+    PreviewMalData(crate::metadata::AnimeMetadata),
+    PreviewMalError(String),
 }
 
 pub struct App {
@@ -353,6 +359,7 @@ pub struct App {
     pub managed_daemon_handle: Option<std::process::Child>,
     pub startup_scan_completed: bool,
     pub dirty: bool,
+    pub preview_state: Option<PreviewState>,
 }
 
 impl App {
@@ -425,6 +432,7 @@ impl App {
             managed_daemon_handle: None,
             startup_scan_completed: false,
             dirty: false,
+            preview_state: None,
         }
     }
 
@@ -555,6 +563,34 @@ impl App {
                         } else {
                             debug!("Auto-save completed");
                             self.dirty = false;
+                        }
+                    }
+                }
+                AppMessage::PreviewTorrentData(files) => {
+                    if self.view == View::PreviewPopup {
+                        if let Some(ref mut state) = self.preview_state {
+                            state.torrent_files = PreviewSection::Loaded(files);
+                        }
+                    }
+                }
+                AppMessage::PreviewTorrentError(err) => {
+                    if self.view == View::PreviewPopup {
+                        if let Some(ref mut state) = self.preview_state {
+                            state.torrent_files = PreviewSection::Error(err);
+                        }
+                    }
+                }
+                AppMessage::PreviewMalData(metadata) => {
+                    if self.view == View::PreviewPopup {
+                        if let Some(ref mut state) = self.preview_state {
+                            state.mal_info = PreviewSection::Loaded(metadata);
+                        }
+                    }
+                }
+                AppMessage::PreviewMalError(err) => {
+                    if self.view == View::PreviewPopup {
+                        if let Some(ref mut state) = self.preview_state {
+                            state.mal_info = PreviewSection::Error(err);
                         }
                     }
                 }
@@ -711,6 +747,25 @@ impl App {
                 let help = widgets::help_bar(&[("?", "help"), ("x", "untrack"), ("Esc", "back")]);
                 frame.render_widget(help, help_area);
             }
+            View::PreviewPopup => {
+                render_search_view(
+                    frame,
+                    main_area,
+                    &self.search_query,
+                    &self.search_results,
+                    &mut self.search_state,
+                    self.search_loading,
+                    self.search_category,
+                    self.search_filter,
+                    self.search_sort,
+                    self.accent,
+                );
+
+                self.render_preview_popup(frame);
+
+                let help = widgets::help_bar(&[("Esc", "close"), ("Ctrl+P", "preview")]);
+                frame.render_widget(help, help_area);
+            }
             View::Help => {
                 match self.previous_view {
                     View::Library => render_library_view(
@@ -783,6 +838,7 @@ impl App {
                     View::DeleteDialog => self.handle_delete_dialog_input(key.code)?,
                     View::Help => self.handle_help_input(key.code)?,
                     View::TrackingList => self.handle_tracking_list_input(key.code)?,
+                    View::PreviewPopup => self.handle_preview_input(key.code)?,
                 }
             }
         }
@@ -972,6 +1028,11 @@ impl App {
                         self.download_selected_torrent();
                     }
                 }
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if !self.search_results.is_empty() {
+                        self.open_preview_popup();
+                    }
+                }
                 KeyCode::Char('?') => {
                     self.toggle_help();
                 }
@@ -1063,7 +1124,7 @@ impl App {
             }
             View::Search => (&mut self.search_state, self.filtered_search_results.len()),
             View::Downloads | View::MoveDialog => (&mut self.downloads_state, self.torrents.len()),
-            View::TrackingDialog | View::DeleteDialog | View::Help | View::TrackingList => return,
+            View::TrackingDialog | View::DeleteDialog | View::Help | View::TrackingList | View::PreviewPopup => return,
         };
 
         if len == 0 {
@@ -1090,7 +1151,7 @@ impl App {
             }
             View::Search => (&mut self.search_state, self.filtered_search_results.len()),
             View::Downloads | View::MoveDialog => (&mut self.downloads_state, self.torrents.len()),
-            View::TrackingDialog | View::DeleteDialog | View::Help | View::TrackingList => return,
+            View::TrackingDialog | View::DeleteDialog | View::Help | View::TrackingList | View::PreviewPopup => return,
         };
 
         if len > 0 {
@@ -1345,6 +1406,151 @@ impl App {
 
             self.view = View::Downloads;
         }
+    }
+
+    fn open_preview_popup(&mut self) {
+        let Some(idx) = self.search_state.selected() else {
+            return;
+        };
+
+        let result_idx = if !self.filtered_search_results.is_empty() {
+            *self.filtered_search_results.get(idx).unwrap_or(&idx)
+        } else {
+            idx
+        };
+
+        let Some(result) = self.search_results.get(result_idx) else {
+            return;
+        };
+
+        let is_magnet_only = result.torrent_url.is_empty();
+
+        let mut state = PreviewState {
+            torrent_title: result.title.clone(),
+            torrent_files: if is_magnet_only {
+                PreviewSection::Error(
+                    "Preview unavailable \u{2014} magnet links don't include file listings"
+                        .to_string(),
+                )
+            } else {
+                PreviewSection::Loading
+            },
+            mal_info: PreviewSection::Loading,
+            is_magnet_only,
+            scroll_state: ListState::default(),
+        };
+
+        // Fetch torrent file list (only if not magnet-only)
+        if !is_magnet_only {
+            let url = result.torrent_url.clone();
+            let tx = self.msg_tx.clone();
+            let client = reqwest::Client::new();
+            tokio::spawn(async move {
+                match fetch_torrent_files(&client, &url).await {
+                    Ok(files) => {
+                        let _ = tx.send(AppMessage::PreviewTorrentData(files));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppMessage::PreviewTorrentError(e.to_string()));
+                    }
+                }
+            });
+        }
+
+        // Fetch MAL data (always, even for magnet-only)
+        if let Some(provider) = self.metadata_provider.clone() {
+            let title = extract_anime_title(&result.title);
+            let tx = self.msg_tx.clone();
+            tokio::spawn(async move {
+                let result = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    provider.search(&title),
+                )
+                .await;
+                match result {
+                    Ok(Ok(results)) => {
+                        if let Some(first) = results.into_iter().next() {
+                            let _ = tx.send(AppMessage::PreviewMalData(first));
+                        } else {
+                            let _ =
+                                tx.send(AppMessage::PreviewMalError("No MAL match".to_string()));
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        let _ = tx.send(AppMessage::PreviewMalError(e.to_string()));
+                    }
+                    Err(_) => {
+                        let _ = tx.send(AppMessage::PreviewMalError(
+                            "MAL lookup timed out".to_string(),
+                        ));
+                    }
+                }
+            });
+        } else {
+            state.mal_info = PreviewSection::Error("MAL not configured".to_string());
+        }
+
+        self.preview_state = Some(state);
+        self.view = View::PreviewPopup;
+    }
+
+    fn handle_preview_input(&mut self, key: KeyCode) -> Result<()> {
+        match key {
+            KeyCode::Esc => {
+                self.view = View::Search;
+                self.preview_state = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn render_preview_popup(&self, frame: &mut Frame) {
+        use ratatui::{
+            layout::{Constraint, Flex, Layout},
+            style::Style,
+            widgets::{Block, Borders, Clear, Paragraph},
+        };
+
+        let Some(ref state) = self.preview_state else {
+            return;
+        };
+
+        let area = frame.area();
+        let popup_width = 70u16.min(area.width.saturating_sub(4));
+        let popup_height = 15u16.min(area.height.saturating_sub(4));
+
+        let horizontal = Layout::horizontal([Constraint::Length(popup_width)]).flex(Flex::Center);
+        let vertical = Layout::vertical([Constraint::Length(popup_height)]).flex(Flex::Center);
+        let [popup_area] = vertical.areas(area);
+        let [popup_area] = horizontal.areas(popup_area);
+
+        frame.render_widget(Clear, popup_area);
+
+        let title = if state.torrent_title.len() > 50 {
+            format!(" Preview: {}... ", &state.torrent_title[..47])
+        } else {
+            format!(" Preview: {} ", &state.torrent_title)
+        };
+
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.accent));
+
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        let loading_text = match (&state.torrent_files, &state.mal_info) {
+            (PreviewSection::Loading, PreviewSection::Loading) => "Loading torrent data and MAL info...",
+            (PreviewSection::Loading, _) => "Loading torrent data...",
+            (_, PreviewSection::Loading) => "Loading MAL info...",
+            _ => "Preview loaded (full rendering in next update)",
+        };
+
+        let paragraph = Paragraph::new(loading_text)
+            .style(Style::default().fg(ratatui::style::Color::DarkGray));
+        frame.render_widget(paragraph, inner);
     }
 
     fn play_selected_download(&mut self) -> Result<()> {
