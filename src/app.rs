@@ -170,6 +170,7 @@ fn find_video_in_dir(dir: &Path) -> Result<PathBuf> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrackingDialogStep {
     Query,
+    Season,
     Group,
     Quality,
     Confirm,
@@ -178,6 +179,7 @@ pub enum TrackingDialogStep {
 pub struct TrackingDialogState {
     pub step: TrackingDialogStep,
     pub input_query: String,
+    pub input_season: String,
     pub input_group: String,
     pub input_quality: String,
 }
@@ -187,6 +189,7 @@ impl Default for TrackingDialogState {
         Self {
             step: TrackingDialogStep::Query,
             input_query: String::new(),
+            input_season: "1".to_string(),
             input_group: String::new(),
             input_quality: String::new(),
         }
@@ -1609,8 +1612,11 @@ impl App {
                 match self.tracking_state.step {
                     TrackingDialogStep::Query => {
                         if !self.tracking_state.input_query.is_empty() {
-                            self.tracking_state.step = TrackingDialogStep::Group;
+                            self.tracking_state.step = TrackingDialogStep::Season;
                         }
+                    }
+                    TrackingDialogStep::Season => {
+                        self.tracking_state.step = TrackingDialogStep::Group;
                     }
                     TrackingDialogStep::Group => {
                         self.tracking_state.step = TrackingDialogStep::Quality;
@@ -1621,10 +1627,11 @@ impl App {
                     TrackingDialogStep::Confirm => {
                         // Create and add the tracked series
                         let query = self.tracking_state.input_query.trim().to_string();
-                        // Generate ID from query if simple, or just use query as title base
                         let id = crate::library::parser::make_show_id(&query);
 
-                        let season = crate::library::parser::parse_season_number(&query).unwrap_or(1);
+                        let season: u32 = self.tracking_state.input_season.trim()
+                            .parse()
+                            .unwrap_or(1);
 
                         let series = TrackedSeries {
                             id: id.clone(),
@@ -1660,6 +1667,7 @@ impl App {
             KeyCode::Backspace => {
                 let input = match self.tracking_state.step {
                     TrackingDialogStep::Query => &mut self.tracking_state.input_query,
+                    TrackingDialogStep::Season => &mut self.tracking_state.input_season,
                     TrackingDialogStep::Group => &mut self.tracking_state.input_group,
                     TrackingDialogStep::Quality => &mut self.tracking_state.input_quality,
                     TrackingDialogStep::Confirm => return Ok(()),
@@ -1669,6 +1677,7 @@ impl App {
             KeyCode::Char(c) => {
                 let input = match self.tracking_state.step {
                     TrackingDialogStep::Query => &mut self.tracking_state.input_query,
+                    TrackingDialogStep::Season => &mut self.tracking_state.input_season,
                     TrackingDialogStep::Group => &mut self.tracking_state.input_group,
                     TrackingDialogStep::Quality => &mut self.tracking_state.input_quality,
                     TrackingDialogStep::Confirm => return Ok(()),
@@ -2393,15 +2402,19 @@ impl App {
 
         let (step_text, input_text) = match self.tracking_state.step {
             TrackingDialogStep::Query => (
-                "Step 1/3: Enter Search Query (e.g. 'Fate Strange Fake')",
+                "Step 1/4: Enter Search Query (e.g. 'Fate Strange Fake')",
                 self.tracking_state.input_query.as_str(),
             ),
+            TrackingDialogStep::Season => (
+                "Step 2/4: Season Number (default: 1)",
+                self.tracking_state.input_season.as_str(),
+            ),
             TrackingDialogStep::Group => (
-                "Step 2/3: Enter Release Group Filter (Optional)",
+                "Step 3/4: Enter Release Group Filter (Optional)",
                 self.tracking_state.input_group.as_str(),
             ),
             TrackingDialogStep::Quality => (
-                "Step 3/3: Enter Quality Filter (Optional)",
+                "Step 4/4: Enter Quality Filter (Optional)",
                 self.tracking_state.input_quality.as_str(),
             ),
             TrackingDialogStep::Confirm => ("Adding series...", ""),
