@@ -1612,6 +1612,11 @@ impl App {
                 match self.tracking_state.step {
                     TrackingDialogStep::Query => {
                         if !self.tracking_state.input_query.is_empty() {
+                            if let Some(season) = crate::library::parser::parse_season_number(
+                                &self.tracking_state.input_query,
+                            ) {
+                                self.tracking_state.input_season = season.to_string();
+                            }
                             self.tracking_state.step = TrackingDialogStep::Season;
                         }
                     }
