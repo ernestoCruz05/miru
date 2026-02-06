@@ -44,7 +44,12 @@ impl Library {
         }
 
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+
+        use std::io::Write;
+        let parent = path.parent().unwrap();
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        temp.write_all(content.as_bytes())?;
+        temp.persist(&path).map_err(|e| e.error)?;
         Ok(())
     }
 
