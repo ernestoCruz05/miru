@@ -55,3 +55,4 @@ discord-rich-presence = "1.1.0"
 ratatui-image = { version = "10.0.4", features = ["crossterm"], default-features = false }
 image = "0.25.9"
 sha2 = "0.10.9"
+serde_bencode = "0.2.4"

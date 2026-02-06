@@ -1,4 +1,5 @@
 mod qbittorrent;
+pub mod preview;
 mod transmission;
 
 pub use qbittorrent::QBittorrentClient;
