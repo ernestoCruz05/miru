@@ -26,9 +26,10 @@ use crate::nyaa::{NyaaCategory, NyaaClient, NyaaFilter, NyaaResult, NyaaSort};
 use crate::player::ExternalPlayer;
 use crate::rpc::DiscordRpc;
 use crate::torrent::{AnyTorrentClient, QBittorrentClient, TorrentStatus, TransmissionClient};
-use crate::torrent::preview::{PreviewState, PreviewSection, TorrentFileEntry, fetch_torrent_files, extract_anime_title};
+use crate::torrent::preview::{PreviewState, PreviewSection, FileType, TorrentFileEntry, fetch_torrent_files, extract_anime_title};
 use crate::ui::{
-    render_downloads_view, render_episodes_view, render_library_view, render_search_view, widgets,
+    render_downloads_view, render_episodes_view, render_library_view, render_preview_popup,
+    render_search_view, widgets,
 };
 
 const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "webm", "m4v", "mov", "wmv"];
@@ -166,6 +167,24 @@ fn find_video_in_dir(dir: &Path) -> Result<PathBuf> {
         std::io::ErrorKind::NotFound,
         format!("No video file found in {:?}", dir),
     )))
+}
+
+/// Count total display items in preview file list (section headers + files)
+fn preview_item_count(state: &PreviewState) -> usize {
+    match &state.torrent_files {
+        PreviewSection::Loading => 1,
+        PreviewSection::Error(_) => 1,
+        PreviewSection::Loaded(files) => {
+            let mut count = files.len();
+            let has_video = files.iter().any(|f| matches!(f.file_type, FileType::Video));
+            let has_sub = files.iter().any(|f| matches!(f.file_type, FileType::Subtitle));
+            let has_other = files.iter().any(|f| matches!(f.file_type, FileType::Other));
+            if has_video { count += 1; }
+            if has_sub { count += 1; }
+            if has_other { count += 1; }
+            count
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -761,9 +780,16 @@ impl App {
                     self.accent,
                 );
 
-                self.render_preview_popup(frame);
+                if let Some(ref mut preview) = self.preview_state {
+                    render_preview_popup(frame, preview, self.accent);
+                }
 
-                let help = widgets::help_bar(&[("Esc", "close"), ("Ctrl+P", "preview")]);
+                let help_hints: &[(&str, &str)] = if self.preview_state.as_ref().is_some_and(|p| p.is_magnet_only) {
+                    &[("Enter", "download anyway"), ("Esc", "close")]
+                } else {
+                    &[("Enter", "download"), ("j/k", "scroll"), ("Esc", "close")]
+                };
+                let help = widgets::help_bar(help_hints);
                 frame.render_widget(help, help_area);
             }
             View::Help => {
@@ -1500,57 +1526,37 @@ impl App {
                 self.view = View::Search;
                 self.preview_state = None;
             }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(ref mut state) = self.preview_state {
+                    let total = preview_item_count(state);
+                    if total > 0 {
+                        let next = match state.scroll_state.selected() {
+                            Some(i) => (i + 1).min(total - 1),
+                            None => 0,
+                        };
+                        state.scroll_state.select(Some(next));
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(ref mut state) = self.preview_state {
+                    let total = preview_item_count(state);
+                    if total > 0 {
+                        let prev = match state.scroll_state.selected() {
+                            Some(0) | None => 0,
+                            Some(i) => i - 1,
+                        };
+                        state.scroll_state.select(Some(prev));
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                self.download_selected_torrent();
+                self.preview_state = None;
+            }
             _ => {}
         }
         Ok(())
-    }
-
-    fn render_preview_popup(&self, frame: &mut Frame) {
-        use ratatui::{
-            layout::{Constraint, Flex, Layout},
-            style::Style,
-            widgets::{Block, Borders, Clear, Paragraph},
-        };
-
-        let Some(ref state) = self.preview_state else {
-            return;
-        };
-
-        let area = frame.area();
-        let popup_width = 70u16.min(area.width.saturating_sub(4));
-        let popup_height = 15u16.min(area.height.saturating_sub(4));
-
-        let horizontal = Layout::horizontal([Constraint::Length(popup_width)]).flex(Flex::Center);
-        let vertical = Layout::vertical([Constraint::Length(popup_height)]).flex(Flex::Center);
-        let [popup_area] = vertical.areas(area);
-        let [popup_area] = horizontal.areas(popup_area);
-
-        frame.render_widget(Clear, popup_area);
-
-        let title = if state.torrent_title.len() > 50 {
-            format!(" Preview: {}... ", &state.torrent_title[..47])
-        } else {
-            format!(" Preview: {} ", &state.torrent_title)
-        };
-
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.accent));
-
-        let inner = block.inner(popup_area);
-        frame.render_widget(block, popup_area);
-
-        let loading_text = match (&state.torrent_files, &state.mal_info) {
-            (PreviewSection::Loading, PreviewSection::Loading) => "Loading torrent data and MAL info...",
-            (PreviewSection::Loading, _) => "Loading torrent data...",
-            (_, PreviewSection::Loading) => "Loading MAL info...",
-            _ => "Preview loaded (full rendering in next update)",
-        };
-
-        let paragraph = Paragraph::new(loading_text)
-            .style(Style::default().fg(ratatui::style::Color::DarkGray));
-        frame.render_widget(paragraph, inner);
     }
 
     fn play_selected_download(&mut self) -> Result<()> {

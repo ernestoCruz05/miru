@@ -245,8 +245,7 @@ fn render_search_results(
 
 pub fn render_preview_popup(
     frame: &mut Frame,
-    preview: &PreviewState,
-    scroll_state: &mut ListState,
+    preview: &mut PreviewState,
     accent: Color,
 ) {
     let area = frame.area();
@@ -292,7 +291,7 @@ pub fn render_preview_popup(
     .split(inner);
 
     // -- File list section --
-    render_file_list(frame, chunks[0], preview, scroll_state, &items, accent);
+    render_file_list(frame, chunks[0], &mut preview.scroll_state, &items, accent);
 
     // -- MAL footer section --
     render_mal_footer(frame, chunks[1], preview);
@@ -403,7 +402,6 @@ fn file_list_item<'a>(entry: &TorrentFileEntry, color: Color) -> ListItem<'a> {
 fn render_file_list(
     frame: &mut Frame,
     area: Rect,
-    _preview: &PreviewState,
     scroll_state: &mut ListState,
     items: &[ListItem],
     accent: Color,
