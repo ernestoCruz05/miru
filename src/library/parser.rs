@@ -1,18 +1,34 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-static SEASON_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+enum CaptureKind {
+    Numeric,
+    RomanNumeral,
+    OrdinalWord,
+}
+
+static SEASON_PATTERNS: LazyLock<Vec<(Regex, CaptureKind)>> = LazyLock::new(|| {
     vec![
         // S01E05, S02E03 (season+episode combo, most specific)
-        Regex::new(r"(?i)\bS(\d{1,2})\s*E\d").unwrap(),
+        (Regex::new(r"(?i)\bS(\d{1,2})\s*E\d").unwrap(), CaptureKind::Numeric),
         // S01, S02 (season only, common in anime releases like "Show S02 - 05")
-        Regex::new(r"(?i)\bS(\d{1,2})\b").unwrap(),
+        (Regex::new(r"(?i)\bS(\d{1,2})\b").unwrap(), CaptureKind::Numeric),
         // "Season 2", "Season 01"
-        Regex::new(r"(?i)\bSeason\s*(\d{1,2})\b").unwrap(),
+        (Regex::new(r"(?i)\bSeason\s*(\d{1,2})\b").unwrap(), CaptureKind::Numeric),
         // "2nd Season", "3rd Season"
-        Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+Season\b").unwrap(),
+        (Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+Season\b").unwrap(), CaptureKind::Numeric),
         // "Part 2" (some shows use Part N for seasons)
-        Regex::new(r"(?i)\bPart\s*(\d{1,2})\b").unwrap(),
+        (Regex::new(r"(?i)\bPart\s*(\d{1,2})\b").unwrap(), CaptureKind::Numeric),
+        // "Cour 2", "Cour 02"
+        (Regex::new(r"(?i)\bCour\s*(\d{1,2})\b").unwrap(), CaptureKind::Numeric),
+        // "2nd Cour", "3rd Cour"
+        (Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+Cour\b").unwrap(), CaptureKind::Numeric),
+        // Roman numerals II-X (longest-first to avoid partial matches, no bare "I")
+        (Regex::new(r"\b(VIII|VII|VI|IV|IX|III|II|V|X)\b").unwrap(), CaptureKind::RomanNumeral),
+        // Japanese season marker: 2期, 3期
+        (Regex::new(r"(\d{1,2})期").unwrap(), CaptureKind::Numeric),
+        // Ordinal words: "Second Season", "Third Cour", etc.
+        (Regex::new(r"(?i)\b(First|Second|Third|Fourth|Fifth|Sixth|Seventh|Eighth|Ninth|Tenth)\s+(?:Season|Cour)\b").unwrap(), CaptureKind::OrdinalWord),
     ]
 });
 
@@ -60,18 +76,54 @@ pub fn parse_episode_number(filename: &str) -> Option<u32> {
 }
 
 pub fn parse_season_number(title: &str) -> Option<u32> {
-    for pattern in SEASON_PATTERNS.iter() {
+    for (pattern, kind) in SEASON_PATTERNS.iter() {
         if let Some(caps) = pattern.captures(title) {
-            if let Some(num_match) = caps.get(1) {
-                if let Ok(num) = num_match.as_str().parse::<u32>() {
-                    if num > 0 && num < 100 {
-                        return Some(num);
+            if let Some(cap) = caps.get(1) {
+                let num = match kind {
+                    CaptureKind::Numeric => cap.as_str().parse::<u32>().ok(),
+                    CaptureKind::RomanNumeral => roman_to_u32(cap.as_str()),
+                    CaptureKind::OrdinalWord => ordinal_to_u32(cap.as_str()),
+                };
+                if let Some(n) = num {
+                    if n > 0 && n < 100 {
+                        return Some(n);
                     }
                 }
             }
         }
     }
     None
+}
+
+fn roman_to_u32(s: &str) -> Option<u32> {
+    match s {
+        "II" => Some(2),
+        "III" => Some(3),
+        "IV" => Some(4),
+        "V" => Some(5),
+        "VI" => Some(6),
+        "VII" => Some(7),
+        "VIII" => Some(8),
+        "IX" => Some(9),
+        "X" => Some(10),
+        _ => None,
+    }
+}
+
+fn ordinal_to_u32(s: &str) -> Option<u32> {
+    match s.to_ascii_lowercase().as_str() {
+        "first" => Some(1),
+        "second" => Some(2),
+        "third" => Some(3),
+        "fourth" => Some(4),
+        "fifth" => Some(5),
+        "sixth" => Some(6),
+        "seventh" => Some(7),
+        "eighth" => Some(8),
+        "ninth" => Some(9),
+        "tenth" => Some(10),
+        _ => None,
+    }
 }
 
 pub fn is_video_file(filename: &str) -> bool {
