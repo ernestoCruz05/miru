@@ -7,7 +7,7 @@ pub mod tracking;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 pub use models::{Episode, Season, Show};
 pub use scanner::scan_all_media_dirs;
@@ -41,6 +41,13 @@ impl Library {
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+        }
+
+        if path.exists() {
+            let bak = path.with_extension("toml.bak");
+            if let Err(e) = std::fs::copy(&path, &bak) {
+                warn!("Failed to create backup: {}", e);
+            }
         }
 
         let content = toml::to_string_pretty(self)?;
