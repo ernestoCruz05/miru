@@ -1,8 +1,21 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-/// Patterns for extracting episode numbers from anime filenames.
-/// Tried in order; first match wins.
+static SEASON_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        // S01E05, S02E03 (season+episode combo, most specific)
+        Regex::new(r"(?i)\bS(\d{1,2})\s*E\d").unwrap(),
+        // S01, S02 (season only, common in anime releases like "Show S02 - 05")
+        Regex::new(r"(?i)\bS(\d{1,2})\b").unwrap(),
+        // "Season 2", "Season 01"
+        Regex::new(r"(?i)\bSeason\s*(\d{1,2})\b").unwrap(),
+        // "2nd Season", "3rd Season"
+        Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+Season\b").unwrap(),
+        // "Part 2" (some shows use Part N for seasons)
+        Regex::new(r"(?i)\bPart\s*(\d{1,2})\b").unwrap(),
+    ]
+});
+
 static EPISODE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
         // [SubGroup] Show Name - 01 [1080p].mkv or Show Name - 01v2.mkv
@@ -37,6 +50,21 @@ pub fn parse_episode_number(filename: &str) -> Option<u32> {
                 if let Ok(num) = num_match.as_str().parse::<u32>() {
                     // Sanity check: episode numbers are usually 1-999
                     if num > 0 && num < 1000 {
+                        return Some(num);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn parse_season_number(title: &str) -> Option<u32> {
+    for pattern in SEASON_PATTERNS.iter() {
+        if let Some(caps) = pattern.captures(title) {
+            if let Some(num_match) = caps.get(1) {
+                if let Ok(num) = num_match.as_str().parse::<u32>() {
+                    if num > 0 && num < 100 {
                         return Some(num);
                     }
                 }

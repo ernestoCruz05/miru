@@ -44,6 +44,12 @@ pub async fn check_for_updates(
                 for result in results {
                     let title = &result.title;
 
+                    if let Some(result_season) = parser::parse_season_number(title) {
+                        if result_season != series.season {
+                            continue;
+                        }
+                    }
+
                     let ep_num = match parser::parse_episode_number(title) {
                         Some(n) => n,
                         None => continue,

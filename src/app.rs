@@ -304,6 +304,7 @@ pub enum AppMessage {
     MetadataError(String),
     TorrentList(Vec<TorrentStatus>),
     UpdatesFound(Vec<UpdateResult>),
+    AutoSave,
 }
 
 pub struct App {
@@ -348,6 +349,7 @@ pub struct App {
     pub rpc: Option<DiscordRpc>,
     pub managed_daemon_handle: Option<std::process::Child>,
     pub startup_scan_completed: bool,
+    pub dirty: bool,
 }
 
 impl App {
@@ -419,6 +421,7 @@ impl App {
             rpc: Some(DiscordRpc::new("1465518237599928381")),
             managed_daemon_handle: None,
             startup_scan_completed: false,
+            dirty: false,
         }
     }
 
@@ -426,6 +429,18 @@ impl App {
         self.refresh_torrent_list();
 
         self.spawn_managed_daemon();
+
+        let auto_save_tx = self.msg_tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if auto_save_tx.send(AppMessage::AutoSave).is_err() {
+                    break;
+                }
+            }
+        });
 
         while self.running {
             terminal.draw(|frame| self.render(frame))?;
@@ -477,6 +492,7 @@ impl App {
                         }
 
                         show.metadata = Some(metadata);
+                        self.dirty = true;
                         let _ = self.library.save();
                     }
                 }
@@ -526,6 +542,16 @@ impl App {
                                     }
                                 }
                             });
+                        }
+                    }
+                }
+                AppMessage::AutoSave => {
+                    if self.dirty {
+                        if let Err(e) = self.library.save() {
+                            error!("Auto-save failed: {}", e);
+                        } else {
+                            debug!("Auto-save completed");
+                            self.dirty = false;
                         }
                     }
                 }
@@ -1180,7 +1206,9 @@ impl App {
             // No IPC (not mpv or socket failed) - mark as watched
             self.library.mark_watched(&show_id, episode_number);
         }
+        self.dirty = true;
         self.library.save()?;
+        self.dirty = false;
 
         Ok(())
     }
@@ -1273,7 +1301,9 @@ impl App {
         } else {
             self.library.mark_watched(&show_id, episode_number);
         }
+        self.dirty = true;
         self.library.save()?;
+        self.dirty = false;
 
         Ok(())
     }
@@ -1366,6 +1396,7 @@ impl App {
                     let show_id = show.id.clone();
                     let ep_num = ep.number;
                     self.library.toggle_watched(&show_id, ep_num);
+                    self.dirty = true;
                     let _ = self.library.save();
                 }
             }
@@ -1375,7 +1406,9 @@ impl App {
     fn refresh_library(&mut self) -> Result<()> {
         let media_dirs = self.config.expanded_media_dirs();
         self.library.refresh(&media_dirs)?;
+        self.dirty = true;
         self.library.save()?;
+        self.dirty = false;
 
         if self.library.shows.is_empty() {
             self.library_state.select(None);
@@ -1591,6 +1624,8 @@ impl App {
                         // Generate ID from query if simple, or just use query as title base
                         let id = crate::library::parser::make_show_id(&query);
 
+                        let season = crate::library::parser::parse_season_number(&query).unwrap_or(1);
+
                         let series = TrackedSeries {
                             id: id.clone(),
                             title: query.clone(),
@@ -1606,12 +1641,15 @@ impl App {
                                 Some(self.tracking_state.input_quality.trim().to_string())
                             },
                             min_episode: 0,
+                            season,
                             metadata_id: None,
                             cached_metadata: None,
                         };
 
                         self.library.tracked_shows.push(series);
+                        self.dirty = true;
                         self.library.save()?;
+                        self.dirty = false;
                         self.view = View::Library;
 
                         // Trigger check immediately?
@@ -2477,7 +2515,9 @@ impl App {
                             std::fs::remove_dir_all(&show.path)?;
                         }
                         self.library.shows.remove(idx);
+                        self.dirty = true;
                         self.library.save()?;
+                        self.dirty = false;
                     }
                     self.view = View::Library;
                     self.library_state.select(None);
@@ -2492,7 +2532,9 @@ impl App {
                             }
                             show.episodes.remove(ep_idx);
                         }
+                        self.dirty = true;
                         self.library.save()?;
+                        self.dirty = false;
                     }
                     self.view = View::Episodes;
                     self.episodes_state.select(None);
@@ -2651,7 +2693,9 @@ impl App {
                 if let Some(idx) = self.tracking_list_state.selected() {
                     if idx < self.library.tracked_shows.len() {
                         self.library.tracked_shows.remove(idx);
+                        self.dirty = true;
                         self.library.save()?;
+                        self.dirty = false;
                         // Adjust selection
                         let len = self.library.tracked_shows.len();
                         if len == 0 {

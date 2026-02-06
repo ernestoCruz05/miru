@@ -42,6 +42,10 @@ pub struct Season {
     pub episodes: Vec<Episode>,
 }
 
+fn default_season() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TrackedSeries {
     pub id: String,
@@ -51,6 +55,8 @@ pub struct TrackedSeries {
     pub filter_quality: Option<String>,
     #[serde(default)]
     pub min_episode: u32,
+    #[serde(default = "default_season")]
+    pub season: u32,
     #[serde(default)]
     pub metadata_id: Option<u64>,
     #[serde(default)]
