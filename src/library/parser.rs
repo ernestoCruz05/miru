@@ -127,7 +127,7 @@ mod tests {
     fn test_episode_prefix() {
         assert_eq!(parse_episode_number("Show Episode 05.mkv"), Some(5));
         assert_eq!(parse_episode_number("Show Ep01.mkv"), Some(1));
-        assert_eq!(parse_episode_number("Fate Strange Fake - E01.mkv"), Some(1)); // New case
+        assert_eq!(parse_episode_number("Fate Strange Fake - E01.mkv"), Some(1));
         assert_eq!(parse_episode_number("Show - E02.mkv"), Some(2));
     }
 
@@ -145,5 +145,66 @@ mod tests {
         assert_eq!(make_show_id("Monster"), "monster");
         assert_eq!(make_show_id("Attack on Titan"), "attack-on-titan");
         assert_eq!(make_show_id("Steins;Gate"), "steins-gate");
+    }
+
+    #[test]
+    fn test_season_s_prefix() {
+        // S01E05 format
+        assert_eq!(
+            parse_season_number("[SubsPlease] Oshi no Ko S02 - 05 [1080p].mkv"),
+            Some(2)
+        );
+        assert_eq!(
+            parse_season_number("Show.Name.S01E01.mkv"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_season_number("[Judas] Attack on Titan S03E12.mkv"),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn test_season_text_pattern() {
+        assert_eq!(
+            parse_season_number("Oshi no Ko Season 2 - 05 [1080p].mkv"),
+            Some(2)
+        );
+        assert_eq!(
+            parse_season_number("Show Season 1 Episode 5.mkv"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_season_ordinal_pattern() {
+        assert_eq!(
+            parse_season_number("Oshi no Ko 2nd Season - 05 [1080p].mkv"),
+            Some(2)
+        );
+        assert_eq!(
+            parse_season_number("Attack on Titan 3rd Season E12.mkv"),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn test_season_part_pattern() {
+        assert_eq!(
+            parse_season_number("Show Name Part 2 - 05 [1080p].mkv"),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_season_none_when_absent() {
+        assert_eq!(
+            parse_season_number("[SubsPlease] Frieren - 09 [1080p].mkv"),
+            None
+        );
+        assert_eq!(
+            parse_season_number("Monster - 74 [720p].mkv"),
+            None
+        );
     }
 }
