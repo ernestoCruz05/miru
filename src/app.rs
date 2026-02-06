@@ -2432,22 +2432,32 @@ impl App {
             layout[1],
         );
 
-        if !self.tracking_state.input_group.is_empty()
+        let season_val: u32 = self.tracking_state.input_season.trim().parse().unwrap_or(1);
+        if season_val > 1
+            || !self.tracking_state.input_group.is_empty()
             || !self.tracking_state.input_quality.is_empty()
         {
-            let summary = format!(
-                "Group: {}, Quality: {}",
+            let mut parts = Vec::new();
+            if season_val > 1 {
+                parts.push(format!("Season: {}", season_val));
+            }
+            parts.push(format!(
+                "Group: {}",
                 if self.tracking_state.input_group.is_empty() {
                     "Any"
                 } else {
                     &self.tracking_state.input_group
-                },
+                }
+            ));
+            parts.push(format!(
+                "Quality: {}",
                 if self.tracking_state.input_quality.is_empty() {
                     "Any"
                 } else {
                     &self.tracking_state.input_quality
                 }
-            );
+            ));
+            let summary = parts.join(", ");
             frame.render_widget(
                 Paragraph::new(summary).style(Style::default().fg(Color::DarkGray)),
                 layout[2],
@@ -2733,7 +2743,7 @@ impl App {
             .tracked_shows
             .iter()
             .map(|s| {
-                let title = format!("{} (Query: {})", s.title, s.query);
+                let title = format!("{} S{:02} (Query: {})", s.title, s.season, s.query);
                 ListItem::new(title)
             })
             .collect();
