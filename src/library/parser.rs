@@ -235,4 +235,41 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn test_season_cour_pattern() {
+        assert_eq!(parse_season_number("Show Cour 2"), Some(2));
+        assert_eq!(parse_season_number("Show Cour 02"), Some(2));
+    }
+
+    #[test]
+    fn test_season_ordinal_cour_pattern() {
+        assert_eq!(parse_season_number("Show 2nd Cour"), Some(2));
+        assert_eq!(parse_season_number("Show 3rd Cour"), Some(3));
+    }
+
+    #[test]
+    fn test_season_roman_numeral() {
+        assert_eq!(parse_season_number("Show III"), Some(3));
+        assert_eq!(parse_season_number("Show II"), Some(2));
+        assert_eq!(parse_season_number("Show IV"), Some(4));
+        assert_eq!(parse_season_number("Show X"), Some(10));
+        // Bare "I" excluded -- too ambiguous, season 1 is default
+        assert_eq!(parse_season_number("Show I"), None);
+    }
+
+    #[test]
+    fn test_season_japanese_ki_marker() {
+        assert_eq!(parse_season_number("Show 2期"), Some(2));
+        assert_eq!(parse_season_number("Show 3期"), Some(3));
+    }
+
+    #[test]
+    fn test_season_ordinal_word() {
+        assert_eq!(parse_season_number("Second Season"), Some(2));
+        assert_eq!(parse_season_number("Third Cour"), Some(3));
+        assert_eq!(parse_season_number("Fifth Season"), Some(5));
+        assert_eq!(parse_season_number("Tenth Season"), Some(10));
+        assert_eq!(parse_season_number("First Season"), Some(1));
+    }
 }
