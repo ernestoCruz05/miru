@@ -14,6 +14,7 @@ https://github.com/user-attachments/assets/c5ff0012-32e4-416c-bff6-95da86b750fb
 | **Auto-Download** | Track series and auto-download new episodes with season-aware filtering |
 | **Cover Art** | Display anime artwork in the terminal via MAL metadata |
 | **Compression** | Zstd compression to save disk space on completed shows |
+| **Archiving** | Archive completed shows (ghost or compressed mode) |
 | **Discord RPC** | Show your current watching activity on Discord |
 
 ---
@@ -91,6 +92,8 @@ miru uses a TOML config file created automatically on first run.
 media_dirs = ["~/Anime", "/mnt/media/Anime"]
 compress_episodes = false   # Enable zstd compression
 compression_level = 3       # 1-19 (higher = smaller, slower)
+archive_path = "~/.miru/archives"  # Where compressed archives are stored
+archive_mode = "ghost"      # "ghost" (delete files) or "compressed" (.tar.zst)
 
 [player.mpv]
 args = ["--fullscreen"]
@@ -218,6 +221,8 @@ miru
 | `/` | Search Nyaa.si |
 | `t` | Track new series |
 | `T` | View tracked series |
+| `A` | Archive show |
+| `V` | View archived shows |
 | `d` | View downloads |
 | `r` | Refresh library |
 | `m` | Fetch MAL metadata |

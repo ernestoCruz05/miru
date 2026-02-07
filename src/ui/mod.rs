@@ -7,5 +7,6 @@ pub mod widgets;
 pub use downloads::render_downloads_view;
 pub use episodes::render_episodes_view;
 pub use library::render_library_view;
-pub use search::render_search_view;
+pub use search::render_glossary_popup;
 pub use search::render_preview_popup;
+pub use search::render_search_view;

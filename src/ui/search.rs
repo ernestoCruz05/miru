@@ -243,11 +243,7 @@ fn render_search_results(
     frame.render_stateful_widget(list, area, list_state);
 }
 
-pub fn render_preview_popup(
-    frame: &mut Frame,
-    preview: &mut PreviewState,
-    accent: Color,
-) {
+pub fn render_preview_popup(frame: &mut Frame, preview: &mut PreviewState, accent: Color) {
     let area = frame.area();
 
     // Build the flat item list to know total height
@@ -305,15 +301,11 @@ pub fn render_preview_popup(
     } else {
         "Enter: Download  |  j/k: Scroll  |  Esc: Close"
     };
-    let hints_paragraph =
-        Paragraph::new(hints).style(Style::default().fg(Color::DarkGray));
+    let hints_paragraph = Paragraph::new(hints).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hints_paragraph, chunks[3]);
 }
 
-fn build_file_list_items<'a>(
-    preview: &PreviewState,
-    accent: Color,
-) -> (Vec<ListItem<'a>>, usize) {
+fn build_file_list_items<'a>(preview: &PreviewState, accent: Color) -> (Vec<ListItem<'a>>, usize) {
     match &preview.torrent_files {
         PreviewSection::Loading => {
             let item = ListItem::new(Line::from(Span::styled(
@@ -334,12 +326,18 @@ fn build_file_list_items<'a>(
             let mut sections = 0;
 
             // Group by type: Video first, then Subtitles, then Other
-            let videos: Vec<&TorrentFileEntry> =
-                files.iter().filter(|f| matches!(f.file_type, FileType::Video)).collect();
-            let subs: Vec<&TorrentFileEntry> =
-                files.iter().filter(|f| matches!(f.file_type, FileType::Subtitle)).collect();
-            let other: Vec<&TorrentFileEntry> =
-                files.iter().filter(|f| matches!(f.file_type, FileType::Other)).collect();
+            let videos: Vec<&TorrentFileEntry> = files
+                .iter()
+                .filter(|f| matches!(f.file_type, FileType::Video))
+                .collect();
+            let subs: Vec<&TorrentFileEntry> = files
+                .iter()
+                .filter(|f| matches!(f.file_type, FileType::Subtitle))
+                .collect();
+            let other: Vec<&TorrentFileEntry> = files
+                .iter()
+                .filter(|f| matches!(f.file_type, FileType::Other))
+                .collect();
 
             if !videos.is_empty() {
                 sections += 1;
@@ -406,29 +404,21 @@ fn render_file_list(
     items: &[ListItem],
     accent: Color,
 ) {
-    let list = List::new(items.to_vec())
-        .highlight_style(
-            Style::default()
-                .bg(accent)
-                .fg(Color::Black),
-        );
+    let list =
+        List::new(items.to_vec()).highlight_style(Style::default().bg(accent).fg(Color::Black));
     frame.render_stateful_widget(list, area, scroll_state);
 }
 
 fn render_mal_footer(frame: &mut Frame, area: Rect, preview: &PreviewState) {
     let line = match &preview.mal_info {
-        PreviewSection::Loading => {
-            Line::from(Span::styled(
-                "\u{25CB} Loading MAL data...",
-                Style::default().fg(Color::DarkGray),
-            ))
-        }
-        PreviewSection::Error(msg) => {
-            Line::from(Span::styled(
-                msg.clone(),
-                Style::default().fg(Color::DarkGray),
-            ))
-        }
+        PreviewSection::Loading => Line::from(Span::styled(
+            "\u{25CB} Loading MAL data...",
+            Style::default().fg(Color::DarkGray),
+        )),
+        PreviewSection::Error(msg) => Line::from(Span::styled(
+            msg.clone(),
+            Style::default().fg(Color::DarkGray),
+        )),
         PreviewSection::Loaded(metadata) => {
             let (badge_text, badge_color) = match metadata.status.as_str() {
                 "currently_airing" => ("[Airing]", Color::Green),
@@ -479,7 +469,146 @@ fn render_summary_line(frame: &mut Frame, area: Rect, preview: &PreviewState) {
         _ => "---".to_string(),
     };
 
-    let paragraph =
-        Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
+    let paragraph = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(paragraph, area);
+}
+
+pub fn render_glossary_popup(frame: &mut Frame, accent: Color) {
+    let area = frame.area();
+
+    let popup_height = 26u16.min(area.height.saturating_sub(4));
+    let popup_width = 60u16.min(area.width.saturating_sub(6));
+
+    let [popup_area] = Layout::horizontal([Constraint::Length(popup_width)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [popup_area] = Layout::vertical([Constraint::Length(popup_height)])
+        .flex(Flex::Center)
+        .areas(popup_area);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" Torrent Terminology ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(accent));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let text = vec![
+        Line::from(Span::styled(
+            "CODECS",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("  x264 (H.264)  ", Style::default().fg(Color::White)),
+            Span::styled(
+                "Older, larger files, universal support",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  x265 (HEVC)   ", Style::default().fg(Color::White)),
+            Span::styled(
+                "~50% smaller, same quality, needs more CPU",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  AV1           ", Style::default().fg(Color::White)),
+            Span::styled(
+                "Newest, smallest, slowest to decode",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "RESOLUTION",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("  1080p         ", Style::default().fg(Color::White)),
+            Span::styled("Full HD (1920x1080)", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled("  720p          ", Style::default().fg(Color::White)),
+            Span::styled(
+                "HD (1280x720), smaller files",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  2160p / 4K    ", Style::default().fg(Color::White)),
+            Span::styled(
+                "Ultra HD, very large files",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "QUALITY",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("  10-bit        ", Style::default().fg(Color::White)),
+            Span::styled(
+                "Better gradients, slightly smaller",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  FLAC          ", Style::default().fg(Color::White)),
+            Span::styled(
+                "Lossless audio (bigger files)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "RELEASE TYPES",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("  [BATCH]       ", Style::default().fg(Color::LightYellow)),
+            Span::styled(
+                "All episodes in one torrent",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  BD / Blu-ray  ", Style::default().fg(Color::White)),
+            Span::styled(
+                "From disc, best quality",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  WEB           ", Style::default().fg(Color::White)),
+            Span::styled(
+                "Streaming rip (Crunchyroll, etc)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "INDICATORS",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("  ★             ", Style::default().fg(Color::LightGreen)),
+            Span::styled(
+                "Trusted uploader (Nyaa verified)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press Esc to close",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(text);
+    frame.render_widget(paragraph, inner);
 }

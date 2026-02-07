@@ -63,6 +63,30 @@ pub struct TrackedSeries {
     pub cached_metadata: Option<crate::metadata::AnimeMetadata>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ArchiveMode {
+    #[default]
+    Ghost,
+    Compressed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchivedShow {
+    pub id: String,
+    pub title: String,
+    pub archived_at: String,
+    pub mode: ArchiveMode,
+    pub archive_file: Option<PathBuf>,
+    pub watch_history: Vec<ArchivedEpisode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchivedEpisode {
+    pub number: u32,
+    pub watched: bool,
+    pub last_position: u64,
+}
+
 impl Show {
     pub fn new(id: impl Into<String>, title: impl Into<String>, path: PathBuf) -> Self {
         Self {

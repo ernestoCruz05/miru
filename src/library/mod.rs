@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-pub use models::{Episode, Season, Show};
+pub use models::{ArchiveMode, ArchivedEpisode, ArchivedShow, Episode, Season, Show};
 pub use scanner::scan_all_media_dirs;
 
 use crate::config::library_path;
@@ -21,6 +21,8 @@ pub struct Library {
     pub shows: Vec<Show>,
     #[serde(default)]
     pub tracked_shows: Vec<models::TrackedSeries>,
+    #[serde(default)]
+    pub archived_shows: Vec<ArchivedShow>,
 }
 
 impl Library {
@@ -130,5 +132,76 @@ impl Library {
                 ep.last_position = 0;
             }
         }
+    }
+
+    pub fn is_archived(&self, show_id: &str) -> bool {
+        self.archived_shows.iter().any(|a| a.id == show_id)
+    }
+
+    pub fn archive_show_ghost(&mut self, show_id: &str) -> Result<()> {
+        let show_idx = self.shows.iter().position(|s| s.id == show_id);
+        let Some(idx) = show_idx else {
+            return Ok(());
+        };
+
+        let show = &self.shows[idx];
+        let archived = ArchivedShow {
+            id: show.id.clone(),
+            title: show.title.clone(),
+            archived_at: chrono::Utc::now().to_rfc3339(),
+            mode: ArchiveMode::Ghost,
+            archive_file: None,
+            watch_history: show
+                .episodes
+                .iter()
+                .map(|e| ArchivedEpisode {
+                    number: e.number,
+                    watched: e.watched,
+                    last_position: e.last_position,
+                })
+                .collect(),
+        };
+
+        crate::archive::delete_show_files(&show.path)?;
+        self.archived_shows.push(archived);
+        self.shows.remove(idx);
+        Ok(())
+    }
+
+    pub fn archive_show_compressed(
+        &mut self,
+        show_id: &str,
+        archive_dir: &std::path::Path,
+        compression_level: i32,
+    ) -> Result<()> {
+        let show_idx = self.shows.iter().position(|s| s.id == show_id);
+        let Some(idx) = show_idx else {
+            return Ok(());
+        };
+
+        let show = &self.shows[idx];
+        let archive_file =
+            crate::archive::compress_show(&show.path, archive_dir, compression_level)?;
+
+        let archived = ArchivedShow {
+            id: show.id.clone(),
+            title: show.title.clone(),
+            archived_at: chrono::Utc::now().to_rfc3339(),
+            mode: ArchiveMode::Compressed,
+            archive_file: Some(archive_file),
+            watch_history: show
+                .episodes
+                .iter()
+                .map(|e| ArchivedEpisode {
+                    number: e.number,
+                    watched: e.watched,
+                    last_position: e.last_position,
+                })
+                .collect(),
+        };
+
+        self.archived_shows.push(archived);
+        self.shows.remove(idx);
+        Ok(())
     }
 }

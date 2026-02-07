@@ -25,11 +25,14 @@ use crate::library::{
 use crate::nyaa::{NyaaCategory, NyaaClient, NyaaFilter, NyaaResult, NyaaSort};
 use crate::player::ExternalPlayer;
 use crate::rpc::DiscordRpc;
+use crate::torrent::preview::{
+    FileType, PreviewSection, PreviewState, TorrentFileEntry, extract_anime_title,
+    fetch_torrent_files,
+};
 use crate::torrent::{AnyTorrentClient, QBittorrentClient, TorrentStatus, TransmissionClient};
-use crate::torrent::preview::{PreviewState, PreviewSection, FileType, TorrentFileEntry, fetch_torrent_files, extract_anime_title};
 use crate::ui::{
-    render_downloads_view, render_episodes_view, render_library_view, render_preview_popup,
-    render_search_view, widgets,
+    render_downloads_view, render_episodes_view, render_glossary_popup, render_library_view,
+    render_preview_popup, render_search_view, widgets,
 };
 
 const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "webm", "m4v", "mov", "wmv"];
@@ -169,7 +172,6 @@ fn find_video_in_dir(dir: &Path) -> Result<PathBuf> {
     )))
 }
 
-/// Count total display items in preview file list (section headers + files)
 fn preview_item_count(state: &PreviewState) -> usize {
     match &state.torrent_files {
         PreviewSection::Loading => 1,
@@ -177,11 +179,19 @@ fn preview_item_count(state: &PreviewState) -> usize {
         PreviewSection::Loaded(files) => {
             let mut count = files.len();
             let has_video = files.iter().any(|f| matches!(f.file_type, FileType::Video));
-            let has_sub = files.iter().any(|f| matches!(f.file_type, FileType::Subtitle));
+            let has_sub = files
+                .iter()
+                .any(|f| matches!(f.file_type, FileType::Subtitle));
             let has_other = files.iter().any(|f| matches!(f.file_type, FileType::Other));
-            if has_video { count += 1; }
-            if has_sub { count += 1; }
-            if has_other { count += 1; }
+            if has_video {
+                count += 1;
+            }
+            if has_sub {
+                count += 1;
+            }
+            if has_other {
+                count += 1;
+            }
             count
         }
     }
@@ -222,9 +232,11 @@ pub enum View {
     Episodes,
     Search,
     Downloads,
+    Archives,
     MoveDialog,
     TrackingDialog,
     DeleteDialog,
+    ArchiveDialog,
     Help,
     TrackingList,
     PreviewPopup,
@@ -318,6 +330,12 @@ impl Default for MoveDialogState {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ArchiveDialogState {
+    pub show_idx: usize,
+    pub show_title: String,
+}
+
 pub enum AppMessage {
     SearchResults(Vec<NyaaResult>),
     SearchError(String),
@@ -365,6 +383,8 @@ pub struct App {
     pub move_dialog: MoveDialogState,
     pub tracking_state: TrackingDialogState,
     pub delete_dialog_state: DeleteDialogState,
+    pub archive_dialog: ArchiveDialogState,
+    pub archives_state: ListState,
 
     pub msg_tx: mpsc::UnboundedSender<AppMessage>,
     pub msg_rx: mpsc::UnboundedReceiver<AppMessage>,
@@ -379,6 +399,7 @@ pub struct App {
     pub startup_scan_completed: bool,
     pub dirty: bool,
     pub preview_state: Option<PreviewState>,
+    pub show_glossary: bool,
 }
 
 impl App {
@@ -428,7 +449,7 @@ impl App {
             is_filtering: false,
             search_state: ListState::default(),
             search_loading: false,
-            search_category: NyaaCategory::AnimeEnglish, // Default to English subs
+            search_category: NyaaCategory::AnimeEnglish,
             search_filter: NyaaFilter::NoFilter,
             search_sort: NyaaSort::default(),
 
@@ -438,6 +459,8 @@ impl App {
             move_dialog: MoveDialogState::default(),
             tracking_state: TrackingDialogState::default(),
             delete_dialog_state: DeleteDialogState::default(),
+            archive_dialog: ArchiveDialogState::default(),
+            archives_state: ListState::default(),
 
             msg_tx,
             msg_rx,
@@ -452,6 +475,7 @@ impl App {
             startup_scan_completed: false,
             dirty: false,
             preview_state: None,
+            show_glossary: false,
         }
     }
 
@@ -671,7 +695,11 @@ impl App {
                     self.accent,
                 );
 
-                let help = widgets::help_bar(&[("?", "help"), ("Esc", "back")]);
+                if self.show_glossary {
+                    render_glossary_popup(frame, self.accent);
+                }
+
+                let help = widgets::help_bar(&[("^i", "info"), ("?", "help"), ("Esc", "back")]);
                 frame.render_widget(help, help_area);
             }
             View::Downloads => {
@@ -684,6 +712,25 @@ impl App {
                 );
 
                 let help = widgets::help_bar(&[("?", "help"), ("Esc", "back")]);
+                frame.render_widget(help, help_area);
+            }
+            View::Archives => {
+                self.render_archives_view(frame, main_area);
+                let help = widgets::help_bar(&[("?", "help"), ("Esc", "back")]);
+                frame.render_widget(help, help_area);
+            }
+            View::ArchiveDialog => {
+                render_library_view(
+                    frame,
+                    main_area,
+                    &self.library.shows,
+                    &mut self.library_state,
+                    self.accent,
+                    &self.image_cache,
+                    &mut self.picker,
+                );
+                self.render_archive_dialog(frame);
+                let help = widgets::help_bar(&[("Enter", "confirm"), ("Esc", "cancel")]);
                 frame.render_widget(help, help_area);
             }
             View::MoveDialog => {
@@ -784,7 +831,11 @@ impl App {
                     render_preview_popup(frame, preview, self.accent);
                 }
 
-                let help_hints: &[(&str, &str)] = if self.preview_state.as_ref().is_some_and(|p| p.is_magnet_only) {
+                let help_hints: &[(&str, &str)] = if self
+                    .preview_state
+                    .as_ref()
+                    .is_some_and(|p| p.is_magnet_only)
+                {
                     &[("Enter", "download anyway"), ("Esc", "close")]
                 } else {
                     &[("Enter", "download"), ("j/k", "scroll"), ("Esc", "close")]
@@ -859,9 +910,11 @@ impl App {
                     View::Episodes => self.handle_episodes_input(key.code)?,
                     View::Search => self.handle_search_input(key)?,
                     View::Downloads => self.handle_downloads_input(key.code).await?,
+                    View::Archives => self.handle_archives_input(key.code)?,
                     View::MoveDialog => self.handle_move_dialog_input(key.code)?,
                     View::TrackingDialog => self.handle_tracking_input(key.code).await?,
                     View::DeleteDialog => self.handle_delete_dialog_input(key.code)?,
+                    View::ArchiveDialog => self.handle_archive_dialog_input(key.code)?,
                     View::Help => self.handle_help_input(key.code)?,
                     View::TrackingList => self.handle_tracking_list_input(key.code)?,
                     View::PreviewPopup => self.handle_preview_input(key.code)?,
@@ -946,6 +999,23 @@ impl App {
                     self.tracking_list_state.select(Some(0));
                 }
             }
+            KeyCode::Char('A') => {
+                if let Some(idx) = self.library_state.selected() {
+                    if let Some(show) = self.library.shows.get(idx) {
+                        self.archive_dialog = ArchiveDialogState {
+                            show_idx: idx,
+                            show_title: show.title.clone(),
+                        };
+                        self.view = View::ArchiveDialog;
+                    }
+                }
+            }
+            KeyCode::Char('V') => {
+                self.view = View::Archives;
+                if !self.library.archived_shows.is_empty() {
+                    self.archives_state.select(Some(0));
+                }
+            }
             KeyCode::Char('?') => {
                 self.toggle_help();
             }
@@ -1011,10 +1081,23 @@ impl App {
                 KeyCode::Down => self.move_selection_down(&View::Search),
                 _ => {}
             }
+        } else if self.show_glossary {
+            match key.code {
+                KeyCode::Esc => {
+                    self.show_glossary = false;
+                }
+                KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.show_glossary = false;
+                }
+                _ => {}
+            }
         } else {
             match key.code {
                 KeyCode::Esc => {
                     self.view = View::Library;
+                }
+                KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.show_glossary = true;
                 }
                 KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.running = false;
@@ -1089,7 +1172,6 @@ impl App {
                 .map(|(i, _)| i)
                 .collect();
         }
-        // Reset selection if list changed
         if !self.filtered_search_results.is_empty() {
             self.search_state.select(Some(0));
         } else {
@@ -1150,7 +1232,13 @@ impl App {
             }
             View::Search => (&mut self.search_state, self.filtered_search_results.len()),
             View::Downloads | View::MoveDialog => (&mut self.downloads_state, self.torrents.len()),
-            View::TrackingDialog | View::DeleteDialog | View::Help | View::TrackingList | View::PreviewPopup => return,
+            View::Archives => (&mut self.archives_state, self.library.archived_shows.len()),
+            View::TrackingDialog
+            | View::DeleteDialog
+            | View::ArchiveDialog
+            | View::Help
+            | View::TrackingList
+            | View::PreviewPopup => return,
         };
 
         if len == 0 {
@@ -1177,7 +1265,13 @@ impl App {
             }
             View::Search => (&mut self.search_state, self.filtered_search_results.len()),
             View::Downloads | View::MoveDialog => (&mut self.downloads_state, self.torrents.len()),
-            View::TrackingDialog | View::DeleteDialog | View::Help | View::TrackingList | View::PreviewPopup => return,
+            View::Archives => (&mut self.archives_state, self.library.archived_shows.len()),
+            View::TrackingDialog
+            | View::DeleteDialog
+            | View::ArchiveDialog
+            | View::Help
+            | View::TrackingList
+            | View::PreviewPopup => return,
         };
 
         if len > 0 {
@@ -1283,17 +1377,13 @@ impl App {
             }
         }
 
-        // Save position or mark watched based on how far they got
         if let Some(pos) = last_position {
             if last_duration > 0 && pos > last_duration.saturating_sub(120) {
-                // Within 2 minutes of end - mark as watched
                 self.library.mark_watched(&show_id, episode_number);
             } else if pos > 10 {
-                // Only save if they watched more than 10 seconds
                 self.library.update_position(&show_id, episode_number, pos);
             }
         } else {
-            // No IPC (not mpv or socket failed) - mark as watched
             self.library.mark_watched(&show_id, episode_number);
         }
         self.dirty = true;
@@ -1466,7 +1556,6 @@ impl App {
             scroll_state: ListState::default(),
         };
 
-        // Fetch torrent file list (only if not magnet-only)
         if !is_magnet_only {
             let url = result.torrent_url.clone();
             let tx = self.msg_tx.clone();
@@ -1483,16 +1572,12 @@ impl App {
             });
         }
 
-        // Fetch MAL data (always, even for magnet-only)
         if let Some(provider) = self.metadata_provider.clone() {
             let title = extract_anime_title(&result.title);
             let tx = self.msg_tx.clone();
             tokio::spawn(async move {
-                let result = tokio::time::timeout(
-                    Duration::from_secs(10),
-                    provider.search(&title),
-                )
-                .await;
+                let result =
+                    tokio::time::timeout(Duration::from_secs(10), provider.search(&title)).await;
                 match result {
                     Ok(Ok(results)) => {
                         if let Some(first) = results.into_iter().next() {
@@ -1707,7 +1792,6 @@ impl App {
             }
         });
 
-        // Refresh list after a short delay
         tokio::time::sleep(Duration::from_millis(200)).await;
         self.refresh_torrent_list();
     }
@@ -1747,7 +1831,6 @@ impl App {
 
         let original_filename = &self.torrents[idx].name;
 
-        // Clean up filename for suggest new show name
         let clean_name = clean_filename(original_filename);
         let media_dirs: Vec<PathBuf> = self.config.expanded_media_dirs();
 
@@ -1820,67 +1903,61 @@ impl App {
             KeyCode::Esc => {
                 self.view = View::Library;
             }
-            KeyCode::Enter => {
-                match self.tracking_state.step {
-                    TrackingDialogStep::Query => {
-                        if !self.tracking_state.input_query.is_empty() {
-                            if let Some(season) = crate::library::parser::parse_season_number(
-                                &self.tracking_state.input_query,
-                            ) {
-                                self.tracking_state.input_season = season.to_string();
-                            }
-                            self.tracking_state.step = TrackingDialogStep::Season;
+            KeyCode::Enter => match self.tracking_state.step {
+                TrackingDialogStep::Query => {
+                    if !self.tracking_state.input_query.is_empty() {
+                        if let Some(season) = crate::library::parser::parse_season_number(
+                            &self.tracking_state.input_query,
+                        ) {
+                            self.tracking_state.input_season = season.to_string();
                         }
-                    }
-                    TrackingDialogStep::Season => {
-                        self.tracking_state.step = TrackingDialogStep::Group;
-                    }
-                    TrackingDialogStep::Group => {
-                        self.tracking_state.step = TrackingDialogStep::Quality;
-                    }
-                    TrackingDialogStep::Quality => {
-                        self.tracking_state.step = TrackingDialogStep::Confirm;
-                    }
-                    TrackingDialogStep::Confirm => {
-                        // Create and add the tracked series
-                        let query = self.tracking_state.input_query.trim().to_string();
-                        let id = crate::library::parser::make_show_id(&query);
-
-                        let season: u32 = self.tracking_state.input_season.trim()
-                            .parse()
-                            .unwrap_or(1);
-
-                        let series = TrackedSeries {
-                            id: id.clone(),
-                            title: query.clone(),
-                            query: query,
-                            filter_group: if self.tracking_state.input_group.trim().is_empty() {
-                                None
-                            } else {
-                                Some(self.tracking_state.input_group.trim().to_string())
-                            },
-                            filter_quality: if self.tracking_state.input_quality.trim().is_empty() {
-                                None
-                            } else {
-                                Some(self.tracking_state.input_quality.trim().to_string())
-                            },
-                            min_episode: 0,
-                            season,
-                            metadata_id: None,
-                            cached_metadata: None,
-                        };
-
-                        self.library.tracked_shows.push(series);
-                        self.dirty = true;
-                        self.library.save()?;
-                        self.dirty = false;
-                        self.view = View::Library;
-
-                        // Trigger check immediately?
-                        self.check_for_updates();
+                        self.tracking_state.step = TrackingDialogStep::Season;
                     }
                 }
-            }
+                TrackingDialogStep::Season => {
+                    self.tracking_state.step = TrackingDialogStep::Group;
+                }
+                TrackingDialogStep::Group => {
+                    self.tracking_state.step = TrackingDialogStep::Quality;
+                }
+                TrackingDialogStep::Quality => {
+                    self.tracking_state.step = TrackingDialogStep::Confirm;
+                }
+                TrackingDialogStep::Confirm => {
+                    let query = self.tracking_state.input_query.trim().to_string();
+                    let id = crate::library::parser::make_show_id(&query);
+
+                    let season: u32 = self.tracking_state.input_season.trim().parse().unwrap_or(1);
+
+                    let series = TrackedSeries {
+                        id: id.clone(),
+                        title: query.clone(),
+                        query: query,
+                        filter_group: if self.tracking_state.input_group.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.tracking_state.input_group.trim().to_string())
+                        },
+                        filter_quality: if self.tracking_state.input_quality.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.tracking_state.input_quality.trim().to_string())
+                        },
+                        min_episode: 0,
+                        season,
+                        metadata_id: None,
+                        cached_metadata: None,
+                    };
+
+                    self.library.tracked_shows.push(series);
+                    self.dirty = true;
+                    self.library.save()?;
+                    self.dirty = false;
+                    self.view = View::Library;
+
+                    self.check_for_updates();
+                }
+            },
             KeyCode::Backspace => {
                 let input = match self.tracking_state.step {
                     TrackingDialogStep::Query => &mut self.tracking_state.input_query,
@@ -2863,6 +2940,8 @@ impl App {
             Row::new(vec!["", "/", "Search Nyaa"]),
             Row::new(vec!["", "t", "Track New Series"]),
             Row::new(vec!["", "T", "View Tracked Shows"]),
+            Row::new(vec!["", "A", "Archive Show"]),
+            Row::new(vec!["", "V", "View Archives"]),
             Row::new(vec!["", "x", "Delete Show"]),
             Row::new(vec!["", "r", "Refresh"]),
             Row::new(vec!["Episodes", "Enter", "Play"]),
@@ -2936,7 +3015,6 @@ impl App {
                         self.dirty = true;
                         self.library.save()?;
                         self.dirty = false;
-                        // Adjust selection
                         let len = self.library.tracked_shows.len();
                         if len == 0 {
                             self.tracking_list_state.select(None);
@@ -2980,6 +3058,176 @@ impl App {
             .highlight_symbol("> ");
 
         frame.render_stateful_widget(list, area, &mut self.tracking_list_state);
+    }
+
+    fn handle_archives_input(&mut self, key: KeyCode) -> Result<()> {
+        match key {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.view = View::Library;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.move_selection_down(&View::Archives);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.move_selection_up(&View::Archives);
+            }
+            KeyCode::Char('?') => {
+                self.toggle_help();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_archive_dialog_input(&mut self, key: KeyCode) -> Result<()> {
+        match key {
+            KeyCode::Esc => {
+                self.view = View::Library;
+            }
+            KeyCode::Enter => {
+                let show_id = self
+                    .library
+                    .shows
+                    .get(self.archive_dialog.show_idx)
+                    .map(|s| s.id.clone());
+
+                if let Some(id) = show_id {
+                    let is_compressed =
+                        self.config.general.archive_mode.to_lowercase() == "compressed";
+
+                    if is_compressed {
+                        let archive_path = self.config.expanded_archive_path();
+                        let level = self.config.general.compression_level;
+                        if let Err(e) =
+                            self.library
+                                .archive_show_compressed(&id, &archive_path, level)
+                        {
+                            error!("Failed to compress-archive show: {}", e);
+                        } else {
+                            info!("Compressed-archived: {}", self.archive_dialog.show_title);
+                            self.dirty = true;
+                            let _ = self.library.save();
+                            self.dirty = false;
+                        }
+                    } else {
+                        if let Err(e) = self.library.archive_show_ghost(&id) {
+                            error!("Failed to ghost-archive show: {}", e);
+                        } else {
+                            info!("Ghost-archived: {}", self.archive_dialog.show_title);
+                            self.dirty = true;
+                            let _ = self.library.save();
+                            self.dirty = false;
+                        }
+                    }
+                }
+                let len = self.library.shows.len();
+                if len == 0 {
+                    self.library_state.select(None);
+                } else if self.archive_dialog.show_idx >= len {
+                    self.library_state.select(Some(len - 1));
+                }
+                self.view = View::Library;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn render_archives_view(&mut self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, List, ListItem};
+
+        let archived = &self.library.archived_shows;
+
+        let items: Vec<ListItem> = archived
+            .iter()
+            .enumerate()
+            .map(|(i, show)| {
+                let mode_indicator = match show.mode {
+                    crate::library::ArchiveMode::Ghost => "[G]",
+                    crate::library::ArchiveMode::Compressed => "[C]",
+                };
+                let watched_count = show.watch_history.iter().filter(|e| e.watched).count();
+                let total_count = show.watch_history.len();
+                let style = if self.archives_state.selected() == Some(i) {
+                    Style::default()
+                        .fg(self.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", mode_indicator), style),
+                    Span::styled(&show.title, style),
+                    Span::styled(
+                        format!(" ({}/{})", watched_count, total_count),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect();
+
+        let title = format!(" Archives ({}) ", archived.len());
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.accent));
+
+        let list = List::new(items).block(block);
+        frame.render_stateful_widget(list, area, &mut self.archives_state);
+    }
+
+    fn render_archive_dialog(&mut self, frame: &mut Frame) {
+        use ratatui::layout::Rect;
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+        let area = frame.area();
+        let popup_width = 50.min(area.width.saturating_sub(4));
+        let popup_height = 7.min(area.height.saturating_sub(4));
+
+        let popup_area = Rect {
+            x: (area.width - popup_width) / 2,
+            y: (area.height - popup_height) / 2,
+            width: popup_width,
+            height: popup_height,
+        };
+
+        frame.render_widget(Clear, popup_area);
+
+        let archive_mode = &self.config.general.archive_mode;
+        let mode_display = if archive_mode.to_lowercase() == "compressed" {
+            "Compressed"
+        } else {
+            "Ghost"
+        };
+
+        let text = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("Archive: {}", self.archive_dialog.show_title),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("Mode: {}", mode_display),
+                Style::default().fg(self.accent),
+            )),
+            Line::from(""),
+        ];
+
+        let block = Block::default()
+            .title(" Archive Show ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.accent));
+
+        let paragraph = Paragraph::new(text)
+            .block(block)
+            .alignment(ratatui::layout::Alignment::Center);
+
+        frame.render_widget(paragraph, popup_area);
     }
 }
 

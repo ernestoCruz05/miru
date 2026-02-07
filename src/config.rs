@@ -37,6 +37,10 @@ pub struct GeneralConfig {
     pub compress_episodes: bool,
     #[serde(default = "default_compression_level")]
     pub compression_level: i32,
+    #[serde(default = "default_archive_path")]
+    pub archive_path: PathBuf,
+    #[serde(default = "default_archive_mode")]
+    pub archive_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,11 +100,19 @@ fn default_true() -> bool {
 }
 
 fn default_compression_level() -> i32 {
-    3 // zstd default, good balance of speed/ratio
+    3
 }
 
 fn default_accent_color() -> String {
     "magenta".to_string()
+}
+
+fn default_archive_path() -> PathBuf {
+    PathBuf::from("~/.miru/archives")
+}
+
+fn default_archive_mode() -> String {
+    "ghost".to_string()
 }
 
 impl Default for Config {
@@ -134,6 +146,8 @@ impl Default for GeneralConfig {
             player: "mpv".to_string(),
             compress_episodes: false,
             compression_level: default_compression_level(),
+            archive_path: default_archive_path(),
+            archive_mode: default_archive_mode(),
         }
     }
 }
@@ -249,6 +263,19 @@ impl Config {
                 p.clone()
             })
             .collect()
+    }
+
+    pub fn expanded_archive_path(&self) -> PathBuf {
+        let path_str = self.general.archive_path.to_string_lossy();
+        if path_str.starts_with("~/") || path_str.starts_with("~\\") || path_str == "~" {
+            if let Some(home) = dirs_home() {
+                if path_str == "~" {
+                    return home;
+                }
+                return home.join(&path_str[2..]);
+            }
+        }
+        self.general.archive_path.clone()
     }
 }
 

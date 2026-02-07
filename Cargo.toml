@@ -48,9 +48,11 @@ serde_json = "1"
 
 # Compression
 zstd = "0.13"
+tar = "0.4"
 
 # Temp files
 tempfile = "3"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 discord-rich-presence = "1.1.0"
 ratatui-image = { version = "10.0.4", features = ["crossterm"], default-features = false }
 image = "0.25.9"
