@@ -12,6 +12,7 @@ https://github.com/user-attachments/assets/c5ff0012-32e4-416c-bff6-95da86b750fb
 | **Smart Playback** | mpv or VLC integration with resume support and progress tracking |
 | **Nyaa.si Search** | Search and download torrents directly from the TUI |
 | **Auto-Download** | Track series and auto-download new episodes with season-aware filtering |
+| **MAL Sync** | Import "Currently Watching" anime from MyAnimeList |
 | **Cover Art** | Display anime artwork in the terminal via MAL metadata |
 | **Compression** | Zstd compression to save disk space on completed shows |
 | **Archiving** | Archive completed shows (ghost or compressed mode) |
@@ -113,11 +114,40 @@ mal_client_id = ""
 
 ### MyAnimeList Setup
 
-Cover art and metadata require a free MAL API key:
+Cover art, metadata, and MAL Sync all require a free MAL API key:
 
 1. Log in to [MyAnimeList API Config](https://myanimelist.net/apiconfig)
-2. Click **Create ID** (App Type: "Other", Name: "Miru")
-3. Copy the **Client ID** into your `config.toml` under `[metadata]`
+2. Click **Create ID** and fill out the form:
+   - **App Type:** "other"
+   - **App Name:** "miru" (or anything you like)
+   - **App Description:** "A terminal-based anime library manager"
+   - **App Redirect URL:** `http://localhost` (required but unused)
+   - **Homepage URL:** Your GitHub fork or `https://github.com/ernestoCruz05/miru`
+   - **Commercial / Non-Commercial:** "non-commercial"
+   - **Name / Company Name:** Your name
+   - **Purpose of Use:** "hobbyist"
+3. Copy the **Client ID** into your `config.toml`:
+
+```toml
+[metadata]
+mal_client_id = "your_client_id_here"
+```
+
+#### Using MAL Sync
+
+Once configured, you can import your "Currently Watching" list from MAL:
+
+1. Open Miru and go to **Tracking List** (press `T`)
+2. Press `S` to start MAL Sync
+3. Copy the authorization URL shown and open it in your browser
+4. Log in to MAL and authorize the app
+5. Copy the authorization code from MAL's redirect page
+6. Paste the code into Miru and press Enter
+
+Your watching list will be imported with episode progress tracked -- already-watched episodes are automatically skipped.
+
+> [!TIP]
+> MAL Sync only imports series you haven't already added to your tracking list. Run it anytime to pick up new shows from your MAL.
 
 ---
 
@@ -256,6 +286,7 @@ miru
 | `Ctrl+C` | Cycle category |
 | `Ctrl+F` | Cycle filter |
 | `Ctrl+S` | Cycle sort |
+| `Ctrl+G` | Toggle torrent glossary |
 | `/` | Filter results |
 | `Esc` | Back |
 
@@ -271,6 +302,18 @@ miru
 | `p` | Pause/Resume |
 | `x` | Remove torrent |
 | `r` | Refresh |
+| `Esc` | Back |
+
+</details>
+
+<details>
+<summary><b>Tracking List</b></summary>
+
+| Key | Action |
+|-----|--------|
+| `j/k` or arrows | Navigate tracked series |
+| `S` | Sync with MyAnimeList |
+| `x` | Stop tracking series |
 | `Esc` | Back |
 
 </details>

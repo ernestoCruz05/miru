@@ -6,6 +6,7 @@ mod error;
 mod image_cache;
 mod library;
 mod metadata;
+mod notify;
 mod nyaa;
 mod player;
 mod rpc;

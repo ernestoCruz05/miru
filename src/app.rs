@@ -22,6 +22,7 @@ use crate::library::{
     Library,
     tracking::{self, UpdateResult},
 };
+use crate::notify::Notifier;
 use crate::nyaa::{NyaaCategory, NyaaClient, NyaaFilter, NyaaResult, NyaaSort};
 use crate::player::ExternalPlayer;
 use crate::rpc::DiscordRpc;
@@ -240,6 +241,7 @@ pub enum View {
     Help,
     TrackingList,
     PreviewPopup,
+    MalSyncDialog,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -260,6 +262,25 @@ impl Default for DeleteDialogState {
             name: String::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum MalSyncStep {
+    #[default]
+    Idle,
+    ShowAuthUrl,
+    WaitingForCode,
+    Syncing,
+    Complete(usize),
+    Error(String),
+}
+
+#[derive(Default)]
+pub struct MalSyncState {
+    pub step: MalSyncStep,
+    pub auth_url: String,
+    pub code_input: String,
+    pub code_verifier: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,16 +416,19 @@ pub struct App {
     pub image_cache: Arc<crate::image_cache::ImageCache>,
     pub picker: ratatui_image::picker::Picker,
     pub rpc: Option<DiscordRpc>,
+    pub notifier: Notifier,
     pub managed_daemon_handle: Option<std::process::Child>,
     pub startup_scan_completed: bool,
     pub dirty: bool,
     pub preview_state: Option<PreviewState>,
     pub show_glossary: bool,
+    pub mal_sync: MalSyncState,
 }
 
 impl App {
     pub fn new(config: Config, library: Library, picker: ratatui_image::picker::Picker) -> Self {
         let accent = widgets::parse_accent_color(&config.ui.accent_color);
+        let notifications_enabled = config.general.notifications;
 
         let mut library_state = ListState::default();
         if !library.shows.is_empty() {
@@ -471,11 +495,13 @@ impl App {
             image_cache,
             picker,
             rpc: Some(DiscordRpc::new("1465518237599928381")),
+            notifier: Notifier::new(notifications_enabled),
             managed_daemon_handle: None,
             startup_scan_completed: false,
             dirty: false,
             preview_state: None,
             show_glossary: false,
+            mal_sync: MalSyncState::default(),
         }
     }
 
@@ -579,6 +605,9 @@ impl App {
                         }
 
                         if let Some(client) = &self.torrent_client {
+                            self.notifier
+                                .new_episode(&update.series_title, update.episode_number);
+
                             info!(
                                 "Auto-downloading: {} - {}",
                                 update.series_title, update.title
@@ -699,7 +728,7 @@ impl App {
                     render_glossary_popup(frame, self.accent);
                 }
 
-                let help = widgets::help_bar(&[("^i", "info"), ("?", "help"), ("Esc", "back")]);
+                let help = widgets::help_bar(&[("^g", "glossary"), ("?", "help"), ("Esc", "back")]);
                 frame.render_widget(help, help_area);
             }
             View::Downloads => {
@@ -810,7 +839,18 @@ impl App {
             }
             View::TrackingList => {
                 self.render_tracking_list(frame, main_area);
-                let help = widgets::help_bar(&[("?", "help"), ("x", "untrack"), ("Esc", "back")]);
+                let help = widgets::help_bar(&[
+                    ("?", "help"),
+                    ("S", "MAL sync"),
+                    ("x", "untrack"),
+                    ("Esc", "back"),
+                ]);
+                frame.render_widget(help, help_area);
+            }
+            View::MalSyncDialog => {
+                self.render_tracking_list(frame, main_area);
+                self.render_mal_sync_dialog(frame);
+                let help = widgets::help_bar(&[("Enter", "continue"), ("Esc", "cancel")]);
                 frame.render_widget(help, help_area);
             }
             View::PreviewPopup => {
@@ -887,6 +927,10 @@ impl App {
                         self.accent,
                     ),
                     View::TrackingList => self.render_tracking_list(frame, main_area),
+                    View::MalSyncDialog => {
+                        self.render_tracking_list(frame, main_area);
+                        self.render_mal_sync_dialog(frame);
+                    }
                     _ => {}
                 }
                 self.render_help(frame);
@@ -918,6 +962,7 @@ impl App {
                     View::Help => self.handle_help_input(key.code)?,
                     View::TrackingList => self.handle_tracking_list_input(key.code)?,
                     View::PreviewPopup => self.handle_preview_input(key.code)?,
+                    View::MalSyncDialog => self.handle_mal_sync_input(key).await?,
                 }
             }
         }
@@ -1086,7 +1131,7 @@ impl App {
                 KeyCode::Esc => {
                     self.show_glossary = false;
                 }
-                KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.show_glossary = false;
                 }
                 _ => {}
@@ -1096,7 +1141,7 @@ impl App {
                 KeyCode::Esc => {
                     self.view = View::Library;
                 }
-                KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.show_glossary = true;
                 }
                 KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1238,7 +1283,8 @@ impl App {
             | View::ArchiveDialog
             | View::Help
             | View::TrackingList
-            | View::PreviewPopup => return,
+            | View::PreviewPopup
+            | View::MalSyncDialog => return,
         };
 
         if len == 0 {
@@ -1271,7 +1317,8 @@ impl App {
             | View::ArchiveDialog
             | View::Help
             | View::TrackingList
-            | View::PreviewPopup => return,
+            | View::PreviewPopup
+            | View::MalSyncDialog => return,
         };
 
         if len > 0 {
@@ -3024,6 +3071,24 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('S') => {
+                if self.config.metadata.mal_client_id.is_empty() {
+                    self.mal_sync.step = MalSyncStep::Error(
+                        "No MAL client ID configured. Add mal_client_id in config.toml".to_string(),
+                    );
+                } else {
+                    let (verifier, challenge) =
+                        crate::metadata::mal::MalClient::generate_pkce_pair();
+                    let client = crate::metadata::mal::MalClient::new(
+                        self.config.metadata.mal_client_id.clone(),
+                    );
+                    self.mal_sync.auth_url = client.build_auth_url(&challenge);
+                    self.mal_sync.code_verifier = verifier;
+                    self.mal_sync.code_input.clear();
+                    self.mal_sync.step = MalSyncStep::ShowAuthUrl;
+                }
+                self.view = View::MalSyncDialog;
+            }
             _ => {}
         }
         Ok(())
@@ -3058,6 +3123,180 @@ impl App {
             .highlight_symbol("> ");
 
         frame.render_stateful_widget(list, area, &mut self.tracking_list_state);
+    }
+
+    async fn handle_mal_sync_input(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        use crossterm::event::KeyCode;
+
+        match &self.mal_sync.step {
+            MalSyncStep::ShowAuthUrl => match key.code {
+                KeyCode::Esc => {
+                    self.mal_sync.step = MalSyncStep::Idle;
+                    self.view = View::TrackingList;
+                }
+                KeyCode::Enter => {
+                    self.mal_sync.step = MalSyncStep::WaitingForCode;
+                }
+                _ => {}
+            },
+            MalSyncStep::WaitingForCode => {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.mal_sync.step = MalSyncStep::Idle;
+                        self.view = View::TrackingList;
+                    }
+                    KeyCode::Char(c) => {
+                        self.mal_sync.code_input.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        self.mal_sync.code_input.pop();
+                    }
+                    KeyCode::Enter => {
+                        // Exchange code for tokens and sync
+                        self.mal_sync.step = MalSyncStep::Syncing;
+                        let client_id = self.config.metadata.mal_client_id.clone();
+                        let code = self.mal_sync.code_input.clone();
+                        let verifier = self.mal_sync.code_verifier.clone();
+
+                        let client = crate::metadata::mal::MalClient::new(client_id);
+                        match client.exchange_code(&code, &verifier).await {
+                            Ok(token_resp) => {
+                                // TODO: Save tokens to config
+                                let mut mal_client = crate::metadata::mal::MalClient::new(
+                                    self.config.metadata.mal_client_id.clone(),
+                                );
+                                mal_client.set_access_token(token_resp.access_token);
+
+                                // Fetch watching list and import
+                                match crate::metadata::mal_sync::sync_from_mal(
+                                    &mal_client,
+                                    &self.library.tracked_shows,
+                                )
+                                .await
+                                {
+                                    Ok(new_shows) => {
+                                        let count = new_shows.len();
+                                        self.library.tracked_shows.extend(new_shows);
+                                        self.library.save()?;
+                                        self.mal_sync.step = MalSyncStep::Complete(count);
+                                        // Trigger episode check for newly added shows
+                                        self.check_for_updates();
+                                    }
+                                    Err(e) => {
+                                        self.mal_sync.step = MalSyncStep::Error(e.to_string());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                self.mal_sync.step = MalSyncStep::Error(e.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            MalSyncStep::Complete(_) | MalSyncStep::Error(_) => {
+                if key.code == KeyCode::Enter || key.code == KeyCode::Esc {
+                    self.mal_sync.step = MalSyncStep::Idle;
+                    self.view = View::TrackingList;
+                }
+            }
+            _ => {
+                if key.code == KeyCode::Esc {
+                    self.mal_sync.step = MalSyncStep::Idle;
+                    self.view = View::TrackingList;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn render_mal_sync_dialog(&self, frame: &mut Frame) {
+        use ratatui::layout::{Constraint, Layout, Rect};
+        use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+
+        let area = frame.area();
+        let popup_width = (area.width as f32 * 0.8) as u16;
+        let popup_height = 12;
+        let popup_x = (area.width - popup_width) / 2;
+        let popup_y = (area.height - popup_height) / 2;
+        let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let (title, content) = match &self.mal_sync.step {
+            MalSyncStep::ShowAuthUrl => (
+                "MAL Sync - Step 1",
+                vec![
+                    Line::from("Open this URL in your browser:"),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        &self.mal_sync.auth_url,
+                        Style::default().fg(Color::Cyan),
+                    )),
+                    Line::from(""),
+                    Line::from("After authorizing, you'll receive a code."),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "[Enter] Continue  [Esc] Cancel",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ],
+            ),
+            MalSyncStep::WaitingForCode => (
+                "MAL Sync - Step 2",
+                vec![
+                    Line::from("Paste the authorization code:"),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        &self.mal_sync.code_input,
+                        Style::default().fg(Color::Yellow),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "[Enter] Submit  [Esc] Cancel",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ],
+            ),
+            MalSyncStep::Syncing => ("MAL Sync", vec![Line::from("Syncing with MyAnimeList...")]),
+            MalSyncStep::Complete(count) => (
+                "MAL Sync - Complete",
+                vec![
+                    Line::from(format!("Successfully imported {} series!", count)),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "[Enter] Close",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ],
+            ),
+            MalSyncStep::Error(msg) => (
+                "MAL Sync - Error",
+                vec![
+                    Line::from(Span::styled(msg.as_str(), Style::default().fg(Color::Red))),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "[Enter] Close",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ],
+            ),
+            MalSyncStep::Idle => ("MAL Sync", vec![Line::from("Idle")]),
+        };
+
+        let block = Block::default()
+            .title(format!(" {} ", title))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.accent));
+
+        let paragraph = Paragraph::new(content)
+            .block(block)
+            .wrap(Wrap { trim: false });
+
+        frame.render_widget(paragraph, popup_area);
     }
 
     fn handle_archives_input(&mut self, key: KeyCode) -> Result<()> {

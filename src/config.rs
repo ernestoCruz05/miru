@@ -23,6 +23,12 @@ pub struct Config {
 pub struct MetadataConfig {
     #[serde(default = "default_mal_client_id")]
     pub mal_client_id: String,
+    #[serde(default)]
+    pub mal_access_token: Option<String>,
+    #[serde(default)]
+    pub mal_refresh_token: Option<String>,
+    #[serde(default)]
+    pub mal_token_expires: Option<i64>,
 }
 
 fn default_mal_client_id() -> String {
@@ -41,6 +47,8 @@ pub struct GeneralConfig {
     pub archive_path: PathBuf,
     #[serde(default = "default_archive_mode")]
     pub archive_mode: String,
+    #[serde(default = "default_true")]
+    pub notifications: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +139,9 @@ impl Default for MetadataConfig {
     fn default() -> Self {
         Self {
             mal_client_id: default_mal_client_id(),
+            mal_access_token: None,
+            mal_refresh_token: None,
+            mal_token_expires: None,
         }
     }
 }
@@ -148,6 +159,7 @@ impl Default for GeneralConfig {
             compression_level: default_compression_level(),
             archive_path: default_archive_path(),
             archive_mode: default_archive_mode(),
+            notifications: true,
         }
     }
 }

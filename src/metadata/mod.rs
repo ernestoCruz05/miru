@@ -2,6 +2,7 @@ use crate::error::Result;
 use serde::{Deserialize, Serialize};
 
 pub mod mal;
+pub mod mal_sync;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AnimeMetadata {

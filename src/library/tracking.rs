@@ -27,12 +27,11 @@ pub async fn check_for_updates(
     for series in tracked {
         info!(series = %series.title, "Checking for updates");
 
-        // Search Nyaa
         match client
             .search(
                 &series.query,
                 NyaaCategory::AnimeEnglish,
-                NyaaFilter::TrustedOnly,
+                NyaaFilter::NoFilter,
                 NyaaSort::Seeders,
             )
             .await
